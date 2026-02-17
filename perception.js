@@ -1,5 +1,6 @@
 import { listDiscoveredSkills, loadSkillBody } from "./skill-loader.js";
 import { telemetry } from "./telemetry.js";
+import { getRoutingModelConfig } from "./routing-config.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -135,21 +136,7 @@ Rules:
 3. If no skills are relevant, return an empty array.
 4. ONLY return JSON.`;
 
-    const config = {
-      // Prioritize generic AGENT_ prefix, fallback to TELEGRAM_ for backward compatibility if needed, 
-      // or just standard OPENAI_COMPAT_ROUTER_? Let's stick to AGENT_ as requested.
-      model: process.env.AGENT_ROUTER_MODEL || process.env.TELEGRAM_ROUTER_MODEL,
-      // Fallback to main LLM config if specific router config is missing
-      endpoint: process.env.AGENT_ROUTER_BASE_URL || process.env.TELEGRAM_ROUTER_BASE_URL || process.env.OPENAI_COMPAT_BASE_URL,
-      apiKey: process.env.AGENT_ROUTER_API_KEY || process.env.TELEGRAM_ROUTER_API_KEY || process.env.OPENAI_COMPAT_API_KEY
-    };
-
-    // 如果没有配置 Router Model，且没配置 Key，则直接回退到关键词（或者复用主模型，这里选择复用主模型但标记）
-    // 其实 Kernel._chat 会 fallback 到主配置，所以这里只传 override
-
-    // Clean undefined keys to avoid overriding defaults with undefined
-    // Clean undefined or empty keys to avoid overriding defaults with invalid values
-    Object.keys(config).forEach(key => (!config[key] || config[key] === "undefined") && delete config[key]);
+    const config = getRoutingModelConfig();
 
     // Use a lightweight call
     const response = await chatFunc(config, [

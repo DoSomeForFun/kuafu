@@ -1,8 +1,11 @@
 import { Perception } from "./perception.js";
 import { Decision } from "./decision.js";
 import { Action } from "./action.js";
+import { ExperienceJournal } from "./experience.js";
 import { createLLMClient } from "./llm-client.js";
 import { telemetry, runWithTrace } from "./telemetry.js";
+import { createProgressEvent, EVENT_TYPES, getProgressHeartbeatMs, normalizeProgressSink } from "./progress-events.js";
+import { getRoutingModelConfig } from "./routing-config.js";
 
 /**
  * The Unified Kernel (HuluWa 2.0 - Pragmatic & Robust)
@@ -13,6 +16,7 @@ export class Kernel {
     this.store = options.store || options.backend;
     this.chatCompletionOverride = options.chatCompletion;
     this.action = options.action || new Action({ cwd: options.workdir });
+    this.progressSink = normalizeProgressSink(options.progressSink);
     this._llmClient = null;
     this._llmClientKey = null;
   }
@@ -29,12 +33,15 @@ export class Kernel {
             status: { type: "string", enum: ["RUNNING", "DONE", "FAILED"] },
             next_action: { type: "string" },
             call_tool: {
-              type: "object",
-              properties: {
-                name: { type: "string" },
-                arguments: { type: "object" }
-              },
-              required: ["name", "arguments"]
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string" },
+                  arguments: { type: "object" }
+                },
+                required: ["name", "arguments"]
+              }
             },
             interaction: {
               type: "object",
@@ -67,11 +74,20 @@ export class Kernel {
   }
 
   async run(options) {
-    const { taskId, prompt: originalPrompt, sessionId, maxSteps = 30, retrievedContext = [], onStep, maxHistory = 10 } = options;
+    const { taskId, prompt: originalPrompt, sessionId, maxSteps = 30, retrievedContext = [], onStep, maxHistory = 10, progressSink } = options;
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
+    const resolvedProgressSink = normalizeProgressSink(progressSink || this.progressSink);
 
     return new Promise((resolve, reject) => {
       runWithTrace(traceId, async () => {
+        let context = {
+          taskId,
+          sessionId,
+          stepCount: 0,
+          progressSink: resolvedProgressSink,
+          progressHeartbeatMs: getProgressHeartbeatMs(),
+          runStartTime: Date.now()
+        };
         const span = telemetry.startSpan("Kernel.run");
         try {
           // --- INIT State ---
@@ -94,11 +110,13 @@ export class Kernel {
           }
 
           // Context Object for FSM
-          let context = {
+          context = {
             // Config
             taskId, sessionId, originalPrompt, maxSteps, maxHistory,
             agentName: options.agentName,
             onStep,
+            progressSink: resolvedProgressSink,
+            progressHeartbeatMs: context.progressHeartbeatMs,
             // Components
             decision, perception, 
             // Runtime State
@@ -116,8 +134,23 @@ export class Kernel {
             advice: null,
             finalResult: null,
             // Flags
-            isReroute: false
+            isReroute: false,
+            // Metrics (for ExperienceJournal)
+            journal: new ExperienceJournal(),
+            toolsUsed: [],
+            toolFailures: 0,
+            totalPromptTokens: 0,
+            totalCompletionTokens: 0,
+            runStartTime: Date.now()
           };
+
+          this._emitProgress(context, EVENT_TYPES.RUN_STARTED, {
+            status: "RUNNING",
+            maxSteps
+          });
+
+          // Inject store context into Action for recall tool
+          this.action.setContext({ store: this.store, taskId, branchId: currentBranchId });
 
           // --- FSM Loop ---
           while (context.state !== "DONE" && context.state !== "FAILED") {
@@ -144,10 +177,31 @@ export class Kernel {
             }
           }
 
+          // Flush ExperienceJournal
+          context.journal.append({
+            taskId, prompt: originalPrompt, steps: context.stepCount,
+            tools_used: context.toolsUsed, tool_failures: context.toolFailures,
+            status: context.finalResult?.status || "DONE",
+            latency_total_ms: Date.now() - context.runStartTime,
+            prompt_tokens_total: context.totalPromptTokens,
+            completion_tokens_total: context.totalCompletionTokens
+          }).catch(e => telemetry.warn("[Kernel] Journal flush failed", { error: e.message }));
+
           span.end({ status: context.finalResult?.status || "DONE" });
+          this._emitProgress(context, EVENT_TYPES.RUN_FINISHED, {
+            status: context.finalResult?.status || "DONE",
+            steps: context.stepCount,
+            durationMs: Date.now() - context.runStartTime
+          });
           resolve(context.finalResult || { status: "DONE" });
         } catch (error) {
           telemetry.error(`Kernel run failed`, error);
+          this._emitProgress(context, EVENT_TYPES.RUN_FAILED, {
+            status: "FAILED",
+            error: error?.message || String(error),
+            steps: context.stepCount || 0,
+            durationMs: Date.now() - (context.runStartTime || Date.now())
+          });
           span.end({ status: "ERROR", error: error.message });
           reject(error);
         }
@@ -158,7 +212,7 @@ export class Kernel {
   // --- FSM Handlers ---
 
   async _handlePerceiving(context) {
-    const { perception, originalPrompt, task, retrievedContext, sessionId, taskId, isReroute } = context;
+    const { perception, originalPrompt, task, retrievedContext, sessionId, taskId, isReroute, stepCount } = context;
     
     // Construct prompt with retry hint if needed
     const promptToUse = isReroute 
@@ -169,7 +223,18 @@ export class Kernel {
       telemetry.info("[Kernel] Rerouting skills based on runtime signal.");
     }
 
-    const isSimpleChat = this._isLikelyChitchat(promptToUse);
+    const heuristicSimpleChat = this._isLikelyChitchat(promptToUse);
+    const isSimpleChat = stepCount <= 0
+      ? await this._classifySimpleChatWithRouter(promptToUse, heuristicSimpleChat)
+      : heuristicSimpleChat;
+
+    if (isSimpleChat !== heuristicSimpleChat) {
+      telemetry.info("[Kernel] Intent router override for simple-chat classification", {
+        heuristic: heuristicSimpleChat,
+        routed: isSimpleChat
+      });
+    }
+
     const sensoryData = await perception.gather({
       prompt: promptToUse, task, retrievedContext, sessionId, taskId,
       isSimpleChat,
@@ -183,6 +248,7 @@ export class Kernel {
     }
 
     context.sensoryData = sensoryData;
+    context.isSimpleChatIntent = isSimpleChat;
     context.contextBlock = perception.formatToContext(sensoryData);
     context.state = "THINKING";
     context.isReroute = false; // Reset flag
@@ -193,6 +259,7 @@ export class Kernel {
   async _handleThinking(context) {
     context.stepCount++;
     const { taskId, currentBranchId, maxHistory, sensoryData, stepCount, turnHint, originalPrompt, agentName, contextBlock } = context;
+    this._emitProgress(context, EVENT_TYPES.STEP_STARTED, { step: stepCount });
     
     const stepSpan = telemetry.startSpan(`Step.${stepCount}`);
     const startTime = Date.now();
@@ -239,7 +306,10 @@ export class Kernel {
 
     // Fast model switch
     let currentModel = null;
-    const isSimpleChat = (sensoryData.skills.length === 0 || this._isLikelyChitchat(originalPrompt)) && stepCount <= 1;
+    const heuristicSimpleChat = sensoryData.skills.length === 0 && this._isLikelyChitchat(originalPrompt) && stepCount <= 1;
+    const isSimpleChat = stepCount <= 1
+      ? Boolean(context.isSimpleChatIntent ?? heuristicSimpleChat)
+      : heuristicSimpleChat;
     if (isSimpleChat && process.env.AGENT_CHAT_MODEL) {
       telemetry.info(`[Kernel] Switching to fast model (${process.env.AGENT_CHAT_MODEL}) for simple chat.`);
       currentModel = process.env.AGENT_CHAT_MODEL;
@@ -271,6 +341,10 @@ export class Kernel {
     context.startTime = startTime;     // Store for persistence later
     context.stepSpan = stepSpan;       // Store to end it later
 
+    // Accumulate metrics for ExperienceJournal
+    context.totalPromptTokens += llmResponse.promptTokens || 0;
+    context.totalCompletionTokens += llmResponse.completionTokens || 0;
+
     // Notify Observer
     if (context.onStep) {
       context.onStep({ step: stepCount, thought: turnResult.thinking, message: turnResult.content, tool_calls: turnResult.tool_calls });
@@ -283,9 +357,31 @@ export class Kernel {
   async _handleDeciding(context) {
     const { decision, turnResult, stepCount, sensoryData, stepSpan } = context;
     
-    const isSimpleChat = (sensoryData.skills.length === 0 || this._isLikelyChitchat(context.originalPrompt)) && stepCount <= 1;
+    const heuristicSimpleChat = (sensoryData.skills.length === 0 || this._isLikelyChitchat(context.originalPrompt)) && stepCount <= 1;
+    const isSimpleChat = stepCount <= 1
+      ? Boolean(context.isSimpleChatIntent ?? heuristicSimpleChat)
+      : heuristicSimpleChat;
     const explicitTaskIntent = this._isLikelyTaskIntent(context.originalPrompt);
     const advice = decision.analyze(turnResult, { stepCount, availableSkillsCount: sensoryData.skills.length, isSimpleChat, explicitTaskIntent });
+
+    // --- 新增：语义自校正逻辑 (Semantic Guard) ---
+    // 如果模型没有调用工具，且不是明确的 DONE，且不是纯聊天，则触发语义校验
+    const hasTools = turnResult.tool_calls && turnResult.tool_calls.length > 0;
+    const explicitlyDone = turnResult.loopStatus === "DONE" || turnResult.content.includes("搞定啦") || turnResult.content.includes("完成");
+
+    if (!hasTools && !explicitlyDone && !isSimpleChat && advice.nextAction !== "STOP") {
+      const audit = await decision.semanticVerify(turnResult, {
+        originalPrompt: context.originalPrompt,
+        availableSkillsCount: sensoryData.skills.length
+      }, this._chat.bind(this));
+
+      if (audit && audit.is_valid === false) {
+        telemetry.warn(`[Kernel] 🛡️ 语义校验拦截成功: ${audit.issue}`);
+        advice.nextAction = "CONTINUE";
+        advice.promptHint = `[逻辑校验失败]: ${audit.suggestion}`;
+      }
+    }
+    // ------------------------------------------
 
     // Check if status is explicitly FAILED in the protocol
     if (turnResult.loopStatus === "FAILED" && advice.nextAction === "STOP") {
@@ -322,9 +418,9 @@ export class Kernel {
       context.finalResult = { status: advice.status, turnResult, message: advice.message };
       
       // Auto-Reflection Trigger
-      // Trigger if status is FAILED, or if configured to always reflect
-      // For now, let's trigger on FAILED or if explicit request
-      if (advice.status === "FAILED" || process.env.AGENT_ALWAYS_REFLECT === "true") {
+      // Reflect on both failure and multi-step success to capture positive/negative lessons
+      const isNonTrivial = context.stepCount >= 3;
+      if (advice.status === "FAILED" || isNonTrivial || process.env.AGENT_ALWAYS_REFLECT === "true") {
         context.state = "REFLECTING";
       } else {
         context.state = "DONE";
@@ -388,6 +484,74 @@ export class Kernel {
     return false;
   }
 
+  async _classifySimpleChatWithRouter(prompt, fallbackValue) {
+    const enabled = String(process.env.AGENT_INTENT_ROUTER_ENABLED || "true") !== "false";
+    if (!enabled) return fallbackValue;
+
+    const text = String(prompt || "")
+      .split("\n")
+      .map((line) => String(line || "").trim())
+      .filter(Boolean)
+      .filter((line) => !line.startsWith("[Context]"))
+      .filter((line) => !line.startsWith("[用户信息]"))
+      .slice(-3)
+      .join(" ")
+      .trim();
+
+    if (!text) return true;
+
+    const routingConfig = getRoutingModelConfig();
+    if (!routingConfig.model) return fallbackValue;
+
+    const timeoutMs = Math.max(200, Number(process.env.AGENT_INTENT_ROUTER_TIMEOUT_MS || 1200));
+    const systemPrompt = `You are an intent classifier. Classify the user message as either:
+- chitchat: greeting, social ping, small talk, emotional reaction, acknowledgement
+- task: request requiring concrete information retrieval, analysis, editing, execution, or tool usage
+
+Output JSON only:
+{"intent":"chitchat|task","confidence":0-1}`;
+
+    let timer = null;
+    try {
+      const classifyPromise = this._chat(routingConfig, [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: text }
+      ], {
+        jsonSchema: {
+          type: "object",
+          properties: {
+            intent: { type: "string", enum: ["chitchat", "task"] },
+            confidence: { type: "number" }
+          },
+          required: ["intent"],
+          additionalProperties: false
+        },
+        jsonSchemaName: "intent_router"
+      });
+
+      const timeoutPromise = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`intent-router-timeout:${timeoutMs}`)), timeoutMs);
+      });
+
+      const response = await Promise.race([classifyPromise, timeoutPromise]);
+      if (timer) clearTimeout(timer);
+
+      const content = String(response?.content || "");
+      const raw = content.match(/\{[\s\S]*\}/)?.[0] || "{}";
+      const parsed = JSON.parse(raw);
+      const intent = String(parsed.intent || "").toLowerCase();
+      if (intent === "chitchat") return true;
+      if (intent === "task") return false;
+      return fallbackValue;
+    } catch (error) {
+      if (timer) clearTimeout(timer);
+      telemetry.warn("[Kernel] Intent router classification failed; fallback to heuristic", {
+        error: error?.message || String(error)
+      });
+      return fallbackValue;
+    }
+  }
+
   async _handleActing(context) {
     const { turnResult, taskId, currentBranchId, onStep, stepSpan, advice } = context;
     
@@ -398,24 +562,78 @@ export class Kernel {
     }
 
     let needsReroute = false;
+    // Read-only tools safe for concurrent execution; add new read-only tools here
+    const PARALLEL_SAFE = new Set(["read", "recall", "search_and_load_skill"]);
+
+    const _trackTool = (tc, actionResult) => {
+      try {
+        const name = tc.function?.name || tc.name;
+        if (name && !context.toolsUsed.includes(name)) context.toolsUsed.push(name);
+        if (!actionResult.ok) context.toolFailures++;
+      } catch (e) {
+        telemetry.warn("[Kernel] _trackTool failed", { error: e.message });
+      }
+    };
 
     if (turnResult.tool_calls?.length > 0) {
+      const totalCalls = turnResult.tool_calls.length;
+      let toolCursor = 0;
+      // Group consecutive parallel-safe calls for concurrent execution
+      const groups = [];
       for (const tc of turnResult.tool_calls) {
-        const toolSpan = telemetry.startSpan(`Tool.${tc.function?.name || tc.name}`);
-        const actionResult = await this._executeAction(tc);
-        toolSpan.end({ success: actionResult.ok });
-
-        if (!actionResult.ok && typeof actionResult.error === "string" && actionResult.error.toLowerCase().includes("not found")) {
-          needsReroute = true;
+        const name = tc.function?.name || tc.name;
+        const safe = PARALLEL_SAFE.has(name);
+        const lastGroup = groups[groups.length - 1];
+        if (lastGroup && lastGroup.parallel && safe) {
+          lastGroup.calls.push(tc);
+        } else {
+          groups.push({ parallel: safe, calls: [tc] });
         }
-        
-        if (onStep) onStep({ tool_result: actionResult });
-        
-        await this.store.saveTaskMessage({
-          taskId, branchId: currentBranchId, executionId: null, senderId: "system",
-          content: JSON.stringify(actionResult),
-          payload: { tool_call_id: tc.id }
-        });
+      }
+
+      for (const group of groups) {
+        if (group.parallel && group.calls.length > 1) {
+          // Concurrent execution for read-only batch
+          telemetry.info(`[Kernel] Parallel executing ${group.calls.length} read-only tools`);
+          const indexedCalls = group.calls.map(tc => ({ tc, position: ++toolCursor }));
+          const results = await Promise.all(indexedCalls.map(async ({ tc, position }) => {
+            const toolSpan = telemetry.startSpan(`Tool.${tc.function?.name || tc.name}`);
+            const actionResult = await this._executeActionWithProgress(context, tc, position, totalCalls);
+            toolSpan.end({ success: actionResult.ok });
+            return { tc, actionResult };
+          }));
+          // Persist results in original order
+          for (const { tc, actionResult } of results) {
+            _trackTool(tc, actionResult);
+            if (!actionResult.ok && typeof actionResult.error === "string" && actionResult.error.toLowerCase().includes("not found")) {
+              needsReroute = true;
+            }
+            if (onStep) onStep({ tool_result: actionResult });
+            await this.store.saveTaskMessage({
+              taskId, branchId: currentBranchId, executionId: null, senderId: "system",
+              content: JSON.stringify(actionResult),
+              payload: { tool_call_id: tc.id }
+            });
+          }
+        } else {
+          // Sequential execution for write/bash or single calls
+          for (const tc of group.calls) {
+            const position = ++toolCursor;
+            const toolSpan = telemetry.startSpan(`Tool.${tc.function?.name || tc.name}`);
+            const actionResult = await this._executeActionWithProgress(context, tc, position, totalCalls);
+            toolSpan.end({ success: actionResult.ok });
+            _trackTool(tc, actionResult);
+            if (!actionResult.ok && typeof actionResult.error === "string" && actionResult.error.toLowerCase().includes("not found")) {
+              needsReroute = true;
+            }
+            if (onStep) onStep({ tool_result: actionResult });
+            await this.store.saveTaskMessage({
+              taskId, branchId: currentBranchId, executionId: null, senderId: "system",
+              content: JSON.stringify(actionResult),
+              payload: { tool_call_id: tc.id }
+            });
+          }
+        }
       }
     }
 
@@ -441,23 +659,27 @@ export class Kernel {
     const messages = await this.store.getActiveMessages(taskId, currentBranchId, 20); // More context for reflection
     const history = this._toHistory(messages);
     
-    // 2. Build Reflection Prompt
+    // 2. Build Reflection Prompt (supports both success and failure)
+    const isSuccess = finalResult.status === "DONE";
     const reflectionPrompt = `
 [SYSTEM: AUTO-REFLECTION]
 The task has ended with status: ${finalResult.status}.
 Your goal is to analyze the execution history and identify if there are any valuable lessons to be learned.
 
 Criteria for a valid lesson:
-1. It must be a specific, actionable rule (e.g., "Do not use tool X for Y", "Always check Z before doing A").
-2. It should be reusable for future tasks.
-3. If the failure was due to simple network error or temporary issue, IGNORE it.
+1. It must be a specific, actionable rule reusable for future tasks.
+2. If the issue was a simple network error or temporary glitch, IGNORE it.
+3. If the task was routine with no noteworthy pattern, IGNORE it.
+${isSuccess
+  ? `4. For successful tasks, capture effective patterns worth replicating (e.g., "Reading config before editing avoids errors", "Using tool X for Y is more efficient").`
+  : `4. For failed tasks, identify the root cause and what should be done differently.`}
 
 Output Format:
 If you find a lesson, return a JSON object with:
 {
-  "root_cause": "Brief explanation of why it failed",
-  "what_not_to_do": "The bad practice to avoid",
-  "suggested_alternatives": "The best practice to follow"
+  "root_cause": "${isSuccess ? "Why this approach worked well" : "Why it failed"}",
+  "what_not_to_do": "${isSuccess ? "The less efficient alternative to avoid" : "The bad practice to avoid"}",
+  "suggested_alternatives": "${isSuccess ? "The effective pattern to replicate" : "The best practice to follow"}"
 }
 
 If NO lesson is worth recording, return exactly: {"ignore": true}
@@ -493,15 +715,18 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
         telemetry.warn("[Kernel] Failed to parse reflection JSON", { content });
       }
 
-      if (lesson && !lesson.ignore && lesson.what_not_to_do) {
+      if (lesson && !lesson.ignore && (lesson.what_not_to_do || lesson.suggested_alternatives)) {
         telemetry.info("[Kernel] Lesson identified", lesson);
         
         // Inject Interaction Protocol into final result
         if (!context.finalResult.protocol) context.finalResult.protocol = {};
+        const desc = isSuccess
+          ? `I identified a useful pattern from this task:\n\n💡 **Insight**: ${lesson.root_cause}\n❌ **Avoid**: ${lesson.what_not_to_do}\n✅ **Prefer**: ${lesson.suggested_alternatives}\n\nShould I record this?`
+          : `I identified a potential lesson from this failure:\n\n❌ **Avoid**: ${lesson.what_not_to_do}\n✅ **Prefer**: ${lesson.suggested_alternatives}\n\nShould I record this?`;
         context.finalResult.protocol.interaction = {
           type: "confirmation",
-          title: "💡 Experience & Lesson",
-          description: `I identified a potential lesson from this failure:\n\n❌ **Avoid**: ${lesson.what_not_to_do}\n✅ **Prefer**: ${lesson.suggested_alternatives}\n\nShould I record this?`,
+          title: isSuccess ? "💡 Effective Pattern" : "💡 Experience & Lesson",
+          description: desc,
           data: { lesson },
           options: [
             { label: "✅ Record", value: "confirm", style: "primary" },
@@ -521,7 +746,17 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
   }
 
   _buildSystemPrompt() {
-    return `你必须返回 JSON 格式回复。`;
+    return `You are an autonomous execution agent. You MUST respond in JSON format.
+
+## Action Policy (STRICT)
+1. **Tool First**: When the task requires any query, read, write, or execution, you MUST issue a tool call via protocol.call_tool in the SAME turn. NEVER just describe what you "plan to do" without calling a tool.
+2. **No Empty Promises**: If your "thought" mentions verbs like check, read, query, execute, find, or list, your protocol MUST contain the corresponding call_tool. Say it, do it.
+3. **One Step at a Time**: Perform one atomic operation per turn. Wait for tool results before deciding the next step. NEVER assume or fabricate results of steps you haven't executed.
+4. **Report Facts Only**: Only report real results returned by tools. NEVER hallucinate or invent output.
+5. **Drive to Completion**: Once you have sufficient information to answer the user, set protocol.status to "DONE". Do not ask for unnecessary confirmations.
+6. **Recall Before Guessing**: If you need context from earlier steps that you can no longer see, use the "recall" tool to search conversation history. If recall returns nothing useful, ask the user directly in your message — never guess or fabricate missing context.
+7. **Stop and Wait**: When you ask the user a question or need their input, you MUST set protocol.status to "DONE" in the SAME turn. Do NOT continue executing after asking — stop and wait for their reply.
+8. **Progress Reporting**: For complex multi-step tasks (3+ steps), proactively send progress updates to the user using the messaging tool at key milestones (e.g., after completing a major sub-step, encountering a decision point, or finding important results). Keep updates brief. Do NOT wait until the end to report everything at once.`;
   }
 
   async _chat(config, messages, options = {}) {
@@ -536,8 +771,8 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
     let finalApiKey = apiKey;
 
     if (config.model && config.model === process.env.AGENT_CHAT_MODEL) {
-      if (process.env.AGENT_CHAT_BASE_URL) finalEndpoint = process.env.AGENT_CHAT_BASE_URL;
-      if (process.env.AGENT_CHAT_API_KEY) finalApiKey = process.env.AGENT_CHAT_API_KEY;
+      if (!config.endpoint && process.env.AGENT_CHAT_BASE_URL) finalEndpoint = process.env.AGENT_CHAT_BASE_URL;
+      if (!config.apiKey && process.env.AGENT_CHAT_API_KEY) finalApiKey = process.env.AGENT_CHAT_API_KEY;
     }
 
     const toolSpecs = this.action.getSpecs();
@@ -566,44 +801,47 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
   _getEnv(field) { return process.env[`OPENAI_COMPAT_${field}`] || process.env[`AGENT_${field}`] || process.env[`TELEGRAM_${field}`] || ""; }
 
   _parseTurnResult(resp, taskId) {
+    telemetry.debug("[Kernel] Raw LLM Content", { content: resp.content });
+    telemetry.debug("[Kernel] Raw LLM ToolCalls", { tool_calls: resp.tool_calls });
+
+    let rawJson = null;
+
+    // 1. Direct JSON.parse (expected path with Structured Outputs)
     try {
-      telemetry.debug("[Kernel] Raw LLM Content", { content: resp.content });
-      telemetry.debug("[Kernel] Raw LLM ToolCalls", { tool_calls: resp.tool_calls });
-
-      const rawJson = JSON.parse(resp.content.match(/\{[\s\S]*\}/)[0]);
-      const tool_calls = resp.tool_calls || [];
-
-      // Spec 1: Standard Protocol (rawJson.protocol.call_tool)
-      if (rawJson.protocol?.call_tool && tool_calls.length === 0) {
-        tool_calls.push({
-          id: `json_call_${Date.now()}`,
-          type: "function",
-          function: { name: rawJson.protocol.call_tool.name, arguments: JSON.stringify(rawJson.protocol.call_tool.arguments) }
-        });
+      rawJson = JSON.parse(resp.content);
+    } catch {
+      // 2. Regex fallback for models that wrap JSON in markdown or extra text
+      try {
+        rawJson = JSON.parse(resp.content.match(/\{[\s\S]*\}/)[0]);
+        telemetry.warn("[Kernel] JSON.parse failed, regex fallback succeeded. Check model structured output config.");
+      } catch {
+        telemetry.error("[Kernel] Failed to parse LLM content as JSON", { content: resp.content?.slice(0, 200) });
+        return { taskId, content: resp.content, thinking: "Parse Error", tool_calls: resp.tool_calls || [], loopStatus: "RUNNING" };
       }
-      // Spec 2: Fallback Strict Tool Object (e.g. {"tool": "bash", "command": ...} or {"name": "bash", "arguments": ...})
-      else if (!rawJson.protocol && (rawJson.tool || rawJson.name) && (rawJson.command || rawJson.arguments) && tool_calls.length === 0) {
-        // This handles the simplified JSON output seen in Turn 2
-        const name = rawJson.tool || rawJson.name;
-        const args = rawJson.arguments || rawJson;
-        // Remove "tool" or "name" from args if they are at top level
-        const cleanArgs = { ...args };
-        delete cleanArgs.tool;
-        delete cleanArgs.name;
-
-        tool_calls.push({
-          id: `json_call_fallback_${Date.now()}`,
-          type: "function",
-          function: { name, arguments: JSON.stringify(cleanArgs) }
-        });
-      }
-      return {
-        taskId, content: rawJson.message || "", thinking: rawJson.thought || "", tool_calls,
-        loopStatus: rawJson.protocol?.status || "RUNNING", loopProtocol: rawJson.protocol || {}
-      };
-    } catch (e) {
-      return { taskId, content: resp.content, thinking: "Parse Error", tool_calls: resp.tool_calls || [], loopStatus: "RUNNING" };
     }
+
+    const tool_calls = resp.tool_calls || [];
+
+    // Extract tool calls from protocol.call_tool if native tool_calls are empty
+    if (rawJson.protocol?.call_tool && tool_calls.length === 0) {
+      const calls = Array.isArray(rawJson.protocol.call_tool)
+        ? rawJson.protocol.call_tool
+        : [rawJson.protocol.call_tool];
+      calls.forEach((tc, i) => {
+        if (tc.name) {
+          tool_calls.push({
+            id: `json_call_${Date.now()}_${i}`,
+            type: "function",
+            function: { name: tc.name, arguments: JSON.stringify(tc.arguments || {}) }
+          });
+        }
+      });
+    }
+
+    return {
+      taskId, content: rawJson.message || "", thinking: rawJson.thought || "", tool_calls,
+      loopStatus: rawJson.protocol?.status || "RUNNING", loopProtocol: rawJson.protocol || {}
+    };
   }
 
   async _executeAction(tc) {
@@ -613,7 +851,92 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
     let args = {};
     try { args = typeof fnArgs === "string" ? JSON.parse(fnArgs) : fnArgs; } catch { }
 
-    return this.action[fnName] ? await this.action[fnName](args) : { ok: false, error: `Tool ${fnName} not found.` };
+    if (!this.action[fnName]) return { ok: false, error: `Tool ${fnName} not found.` };
+
+    const TRANSIENT = /timeout|timed out|etimedout|econnrefused|econnreset|econnaborted|epipe|network|socket hang up|503|502|504|429|temporar(?:y|ily)|resource busy|text file busy|permission denied|operation not permitted|eacces|eperm/i;
+    const MAX_RETRIES = 1;
+
+    let result = await this.action[fnName](args);
+    const errorText = `${result.error || ""}\n${result.stderr || ""}`;
+    const alreadyRetried = Boolean(result.retryInfo?.exhausted);
+    if (!result.ok && !alreadyRetried && TRANSIENT.test(errorText)) {
+      for (let i = 0; i < MAX_RETRIES; i++) {
+        telemetry.warn(`[Kernel] Transient error detected, auto-retry ${i + 1}/${MAX_RETRIES}`, { tool: fnName, error: result.error });
+        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+        result = await this.action[fnName](args);
+        if (result.ok) break;
+      }
+    }
+    return result;
+  }
+
+  async _executeActionWithProgress(context, tc, toolIndex, toolTotal) {
+    const toolName = tc.function?.name || tc.name || "unknown_tool";
+    const startedAt = Date.now();
+    let heartbeatCount = 0;
+    const heartbeatMs = Math.max(1000, Number(context.progressHeartbeatMs || getProgressHeartbeatMs()));
+
+    this._emitProgress(context, EVENT_TYPES.TOOL_STARTED, {
+      step: context.stepCount,
+      toolName,
+      toolIndex,
+      toolTotal
+    });
+
+    const timer = setInterval(() => {
+      heartbeatCount++;
+      this._emitProgress(context, EVENT_TYPES.TOOL_HEARTBEAT, {
+        step: context.stepCount,
+        toolName,
+        toolIndex,
+        toolTotal,
+        heartbeatCount,
+        durationMs: Date.now() - startedAt
+      });
+    }, heartbeatMs);
+
+    if (typeof timer.unref === "function") timer.unref();
+
+    try {
+      const result = await this._executeAction(tc);
+      this._emitProgress(context, EVENT_TYPES.TOOL_FINISHED, {
+        step: context.stepCount,
+        toolName,
+        toolIndex,
+        toolTotal,
+        ok: Boolean(result.ok),
+        durationMs: Date.now() - startedAt,
+        retryInfo: result.retryInfo,
+        error: result.ok ? undefined : String(result.error || "")
+      });
+      return result;
+    } catch (error) {
+      this._emitProgress(context, EVENT_TYPES.TOOL_FINISHED, {
+        step: context.stepCount,
+        toolName,
+        toolIndex,
+        toolTotal,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        error: error?.message || String(error)
+      });
+      throw error;
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  _emitProgress(context, type, payload = {}) {
+    try {
+      const sink = normalizeProgressSink(context?.progressSink || this.progressSink);
+      const event = createProgressEvent({ taskId: context?.taskId, sessionId: context?.sessionId }, type, payload);
+      const maybePromise = sink.emit(event);
+      if (maybePromise?.catch) {
+        maybePromise.catch((err) => telemetry.warn("[Kernel] progress sink emit failed", { error: err?.message || String(err) }));
+      }
+    } catch (error) {
+      telemetry.warn("[Kernel] progress emit crashed", { error: error?.message || String(error) });
+    }
   }
 
   async _saveExecution(taskId, prompt, turnResult, response, latencyMs, startTime) {

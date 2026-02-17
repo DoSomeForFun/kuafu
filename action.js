@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
+import { listDiscoveredSkills, loadSkillBody } from "./skill-loader.js";
 
 const execAsync = promisify(execCb);
 
@@ -16,6 +17,9 @@ export class Action {
     this.cwd = this.projectRoot;
     this.sandboxPath = null;
     this.timeoutMs = options.timeoutMs || 120000;
+    this.bashRetryMax = this._toSafeInt(options.bashRetryMax ?? process.env.TELEGRAM_BASH_RETRY_MAX, 1);
+    this.bashRetryBaseDelayMs = this._toSafeInt(options.bashRetryBaseDelayMs ?? process.env.TELEGRAM_BASH_RETRY_BASE_DELAY_MS, 800);
+    this.bashRetryMaxDelayMs = this._toSafeInt(options.bashRetryMaxDelayMs ?? process.env.TELEGRAM_BASH_RETRY_MAX_DELAY_MS, 4000);
   }
 
   getSpecs() {
@@ -53,6 +57,36 @@ export class Action {
       {
         type: "function",
         function: {
+          name: "recall",
+          description: "Recall earlier conversation history for the current task. Use when you need context from previous steps that are no longer visible, such as earlier tool results, user instructions, or intermediate findings.",
+          parameters: {
+            type: "object",
+            properties: {
+              keyword: { type: "string", description: "Optional keyword to filter messages (e.g., 'sqlite', 'error'). Leave empty to get the most recent older messages." },
+              limit: { type: "number", description: "Number of messages to retrieve (default: 10, max: 30)." }
+            },
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "search_and_load_skill",
+          description: "搜索并加载一个技能的完整文档。当你在执行中发现需要某个工具或领域知识但当前上下文中没有时，调用此工具按关键词搜索可用技能并加载其详细说明。",
+          parameters: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "搜索关键词，如 'sqlite'、'git'、'docker'。" }
+            },
+            required: ["query"],
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
           name: "write",
           description: "在沙盒内创建或覆盖文件。",
           parameters: {
@@ -79,12 +113,64 @@ export class Action {
   }
 
   async bash(args) {
-    try {
-      const { stdout, stderr } = await execAsync(args.command, { cwd: this.cwd, timeout: this.timeoutMs });
-      return { ok: true, stdout: stdout.trim(), stderr: stderr.trim() };
-    } catch (error) {
-      return { ok: false, error: error.message, stderr: error.stderr };
+    const OUTPUT_LIMIT = 3000;
+    const maxRetries = this.bashRetryMax;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const { stdout, stderr } = await execAsync(args.command, { cwd: this.cwd, timeout: this.timeoutMs });
+        return {
+          ok: true,
+          stdout: this._smartTruncate(stdout.trim(), OUTPUT_LIMIT),
+          stderr: stderr.trim(),
+          retryInfo: { retried: attempt, attempts: attempt + 1, exhausted: false }
+        };
+      } catch (error) {
+        const errorText = `${error?.message || ""}\n${error?.stderr || ""}`;
+        const retryable = this._isRetryableBashError(errorText);
+        const exhausted = !retryable || attempt >= maxRetries;
+
+        if (exhausted) {
+          return {
+            ok: false,
+            error: this._smartTruncate(error.message, OUTPUT_LIMIT),
+            stderr: error.stderr,
+            retryInfo: { retried: attempt, attempts: attempt + 1, retryable, exhausted: true }
+          };
+        }
+
+        await this._sleep(this._retryDelayMs(attempt + 1));
+      }
     }
+
+    return { ok: false, error: "Unexpected retry loop state in bash tool." };
+  }
+
+  _smartTruncate(text, limit) {
+    if (!text || text.length <= limit) return text;
+    const headSize = Math.floor(limit * 0.6);
+    const tailSize = limit - headSize;
+    return `${text.slice(0, headSize)}\n\n[... truncated ${text.length - headSize - tailSize} chars, total ${text.length} chars. Use | head, | tail, or | grep to refine ...]\n\n${text.slice(-tailSize)}`;
+  }
+
+  _isRetryableBashError(errorText) {
+    const RETRYABLE_PATTERN = /timeout|timed out|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|enetunreach|ehostunreach|epipe|429|502|503|504|socket hang up|network|temporar(?:y|ily)|resource busy|text file busy|permission denied|operation not permitted|eacces|eperm/i;
+    return RETRYABLE_PATTERN.test(String(errorText || ""));
+  }
+
+  _retryDelayMs(attempt) {
+    const exponential = Math.min(this.bashRetryBaseDelayMs * (2 ** Math.max(attempt - 1, 0)), this.bashRetryMaxDelayMs);
+    const jitter = Math.floor(Math.random() * 200);
+    return exponential + jitter;
+  }
+
+  _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  _toSafeInt(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
   }
 
   async read(args) {
@@ -94,6 +180,56 @@ export class Action {
       const content = fs.readFileSync(target, "utf-8");
       return { ok: true, content: content.slice(0, 5000) };
     } catch (e) { return { ok: false, error: e.message }; }
+  }
+
+  setContext({ store, taskId, branchId }) {
+    this._store = store;
+    this._taskId = taskId;
+    this._branchId = branchId;
+  }
+
+  async recall(args) {
+    if (!this._store || !this._taskId) return { ok: false, error: "No task context available." };
+
+    const limit = Math.min(Math.max(args.limit || 10, 1), 30);
+    const messages = await this._store.getActiveMessages(this._taskId, this._branchId, limit + 20);
+
+    let results = messages.map(m => ({
+      sender: m.senderId,
+      content: String(m.content || "").slice(0, 500),
+      time: new Date(m.createdAt).toISOString()
+    }));
+
+    if (args.keyword) {
+      const kw = args.keyword.toLowerCase();
+      results = results.filter(m => m.content.toLowerCase().includes(kw));
+    }
+
+    return { ok: true, count: results.length, messages: results.slice(-limit) };
+  }
+
+  async search_and_load_skill(args) {
+    const query = String(args.query || "").toLowerCase();
+    if (!query) return { ok: false, error: "query is required." };
+
+    const allSkills = listDiscoveredSkills({ skillsDir: process.env.TELEGRAM_SKILLS_DIR });
+    if (!allSkills.length) return { ok: false, error: "No skills available." };
+
+    // Match by name keywords or description
+    const matches = allSkills.filter(s => {
+      const nameTokens = s.name.toLowerCase().split(/[-_]+/);
+      const desc = (s.description || "").toLowerCase();
+      return nameTokens.some(t => t.includes(query) || query.includes(t)) || desc.includes(query);
+    });
+
+    if (matches.length === 0) {
+      return { ok: false, available: allSkills.map(s => s.name), error: `No skill matched "${args.query}". See 'available' for all skills.` };
+    }
+
+    // Load the best match's full body
+    const skill = matches[0];
+    const body = loadSkillBody(skill.path);
+    return { ok: true, name: skill.name, description: skill.description, instructions: body.slice(0, 4000) };
   }
 
   async write(args) {

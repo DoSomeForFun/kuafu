@@ -7,11 +7,13 @@ const DEFAULT_SNIPPET_CHARS = 1200;
 const BUILTIN_SKILLS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "default-skills");
 const AGENTS_SKILLS_BEGIN = "<!-- AUTO_SKILLS_BEGIN -->";
 const AGENTS_SKILLS_END = "<!-- AUTO_SKILLS_END -->";
+const EXCLUDED_BUILTIN_SKILLS = new Set(["telegram-manage", "telegram-speak", "toastplan-http-sync"]);
 
-function walkSkillFiles(rootDir, maxScan = DEFAULT_MAX_SCAN) {
+function walkSkillFiles(rootDir, maxScan = DEFAULT_MAX_SCAN, options = {}) {
   if (!rootDir || !fs.existsSync(rootDir)) return [];
   const stack = [path.resolve(rootDir)];
   const files = [];
+  const isBuiltin = Boolean(options.isBuiltin);
 
   while (stack.length && files.length < maxScan) {
     const current = stack.pop();
@@ -28,6 +30,7 @@ function walkSkillFiles(rootDir, maxScan = DEFAULT_MAX_SCAN) {
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
         if (entry.name === ".git" || entry.name === "node_modules") continue;
+        if (isBuiltin && EXCLUDED_BUILTIN_SKILLS.has(entry.name)) continue;
         stack.push(fullPath);
         continue;
       }
@@ -57,7 +60,8 @@ function collectSkillFiles(roots, maxScan) {
   for (const root of roots) {
     const remaining = maxScan - files.length;
     if (remaining <= 0) break;
-    files.push(...walkSkillFiles(root, remaining));
+    const isBuiltin = path.resolve(root) === path.resolve(BUILTIN_SKILLS_DIR);
+    files.push(...walkSkillFiles(root, remaining, { isBuiltin }));
   }
   return [...new Set(files)];
 }
@@ -162,5 +166,4 @@ export function formatSkillContext(skills = []) {
   }
   return lines.join("\n");
 }
-
 

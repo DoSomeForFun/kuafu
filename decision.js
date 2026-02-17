@@ -11,6 +11,53 @@ export class Decision {
     this.consecutiveInterceptions = 0;
   }
 
+  /**
+   * 语义校验：利用轻量级模型检查思考逻辑与实际动作是否对齐
+   */
+  async semanticVerify(turnResult, state, chatFunc) {
+    const { content, thinking, tool_calls } = turnResult;
+    const { originalPrompt, availableSkillsCount } = state;
+
+    // 如果是纯聊天模式或没有技能，跳过语义检查
+    if (availableSkillsCount === 0 || !originalPrompt) return { is_valid: true };
+
+    const hasTools = tool_calls && tool_calls.length > 0;
+    
+    const criticModel = process.env.AGENT_CRITIC_MODEL || process.env.AGENT_CHAT_MODEL || "gemini-1.5-flash";
+    const criticConfig = { model: criticModel };
+    if (process.env.AGENT_CRITIC_BASE_URL) criticConfig.endpoint = process.env.AGENT_CRITIC_BASE_URL;
+    if (process.env.AGENT_CRITIC_API_KEY) criticConfig.apiKey = process.env.AGENT_CRITIC_API_KEY;
+    const systemPrompt = `你是一个动作审计员。你的任务是检查执行者是否在“空谈”。
+检查准则：
+1. 如果执行者在“思考”或“回复”中承诺要执行具体操作（如：查、读、写、跑、找、ls、cat等），但 tool_calls 为空，则视为“空谈”。
+2. 如果执行者认为任务已完成，但实际目标未达成，则视为“过早结束”。
+3. 仅仅是总结已有的信息，不属于空谈。
+
+请返回 JSON 格式：
+{
+  "is_valid": boolean,
+  "issue": "如果无效，请描述问题",
+  "suggestion": "给执行者的改进建议（如：请调用 read 工具读取文件内容）"
+}`;
+
+    const userContent = `原始目标: "${originalPrompt}"
+执行者思考: "${thinking}"
+执行者回复: "${content}"
+执行者动作: ${JSON.stringify(tool_calls || [])}`;
+
+    try {
+      const resp = await chatFunc(criticConfig, [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent }
+      ], { jsonMode: true });
+
+      const audit = JSON.parse(resp.content.match(/\{[\s\S]*\}/)[0]);
+      return audit;
+    } catch (e) {
+      return { is_valid: true, error: "Audit failed, bypassing" };
+    }
+  }
+
   analyze(turnResult, state) {
     const { tool_calls, content, thinking, loopStatus } = turnResult;
     const { stepCount, availableSkillsCount, isSimpleChat, explicitTaskIntent } = state;
