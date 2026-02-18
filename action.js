@@ -212,7 +212,10 @@ export class Action {
     const query = String(args.query || "").toLowerCase();
     if (!query) return { ok: false, error: "query is required." };
 
-    const allSkills = listDiscoveredSkills({ skillsDir: process.env.TELEGRAM_SKILLS_DIR });
+    const allSkills = listDiscoveredSkills({
+      skillsDir: process.env.AGENT_SKILLS_DIR || process.env.TELEGRAM_SKILLS_DIR,
+      skillsDirs: process.env.AGENT_SKILLS_DIRS
+    });
     if (!allSkills.length) return { ok: false, error: "No skills available." };
 
     // Match by name keywords or description

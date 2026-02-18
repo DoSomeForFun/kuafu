@@ -95,7 +95,10 @@ export class Kernel {
           if (!task) throw new Error(`Task not found: ${taskId}`);
 
           const decision = new Decision({ maxSteps });
-          const perception = new Perception({ skillsDir: process.env.TELEGRAM_SKILLS_DIR });
+          const perception = new Perception({
+            skillsDir: process.env.AGENT_SKILLS_DIR || process.env.TELEGRAM_SKILLS_DIR,
+            skillsDirs: process.env.AGENT_SKILLS_DIRS
+          });
 
           let currentBranchId = task.current_branch_id || (await this.store.pivotBranch(taskId));
 
@@ -224,9 +227,10 @@ export class Kernel {
     }
 
     const heuristicSimpleChat = this._isLikelyChitchat(promptToUse);
-    const isSimpleChat = stepCount <= 0
-      ? await this._classifySimpleChatWithRouter(promptToUse, heuristicSimpleChat)
-      : heuristicSimpleChat;
+    let isSimpleChat = heuristicSimpleChat;
+    if (stepCount <= 0 && !heuristicSimpleChat) {
+      isSimpleChat = await this._classifySimpleChatWithRouter(promptToUse, heuristicSimpleChat);
+    }
 
     if (isSimpleChat !== heuristicSimpleChat) {
       telemetry.info("[Kernel] Intent router override for simple-chat classification", {
@@ -459,6 +463,14 @@ export class Kernel {
     const greet2 = /(你好|在吗|早上好|上午好|中午好|下午好|晚上好|晚安)\s*[!！。\.]?\s*$/i;
     if (greet2.test(normalized) && normalized.length <= 12) return true;
 
+    const wakePing = /^(葫芦娃|huluwa|爷爷|grandpa|leetao)\s*(在吗|在么|在不在|吗|么|你好|哈喽)?\s*[?？!！。\.]*$/i;
+    if (wakePing.test(normalized)) return true;
+
+    if (normalized.length <= 4) {
+      const shortTaskLike = /(查|修|改|写|做|跑|测|搜|log|sql|db|git|代码|脚本|bug|报错|error)/i;
+      if (!shortTaskLike.test(normalized)) return true;
+    }
+
     return false;
   }
 
@@ -523,7 +535,7 @@ Output JSON only:
             intent: { type: "string", enum: ["chitchat", "task"] },
             confidence: { type: "number" }
           },
-          required: ["intent"],
+          required: ["intent", "confidence"],
           additionalProperties: false
         },
         jsonSchemaName: "intent_router"

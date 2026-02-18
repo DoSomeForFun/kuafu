@@ -45,14 +45,49 @@ function walkSkillFiles(rootDir, maxScan = DEFAULT_MAX_SCAN, options = {}) {
 
 function listSkillRoots(customDir) {
   const roots = [];
-  const includeBuiltin = String(process.env.TELEGRAM_INCLUDE_BUILTIN_SKILLS || "true").toLowerCase() !== "false";
+  const includeBuiltin = readBooleanEnv(["AGENT_INCLUDE_BUILTIN_SKILLS", "TELEGRAM_INCLUDE_BUILTIN_SKILLS"], true);
   if (includeBuiltin && fs.existsSync(BUILTIN_SKILLS_DIR)) {
     roots.push(path.resolve(BUILTIN_SKILLS_DIR));
   }
-  if (customDir && fs.existsSync(customDir)) {
-    roots.push(path.resolve(customDir));
+  const customDirs = normalizeSkillDirs(customDir);
+  for (const dir of customDirs) {
+    if (fs.existsSync(dir)) {
+      roots.push(path.resolve(dir));
+    }
   }
   return [...new Set(roots)];
+}
+
+function readBooleanEnv(names, fallback) {
+  for (const name of names) {
+    const raw = process.env[name];
+    if (raw == null || raw === "") continue;
+    return String(raw).toLowerCase() !== "false";
+  }
+  return fallback;
+}
+
+function normalizeSkillDirs(value) {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => normalizeSkillDirs(item))
+      .filter(Boolean);
+  }
+  if (!value) return [];
+  return String(value)
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function resolveConfiguredSkillDirs(options = {}) {
+  const dirs = [];
+  dirs.push(...normalizeSkillDirs(options.skillsDirs));
+  dirs.push(...normalizeSkillDirs(options.skillsDir));
+  dirs.push(...normalizeSkillDirs(process.env.AGENT_SKILLS_DIRS));
+  dirs.push(...normalizeSkillDirs(process.env.AGENT_SKILLS_DIR));
+  dirs.push(...normalizeSkillDirs(process.env.TELEGRAM_SKILLS_DIR));
+  return [...new Set(dirs)];
 }
 
 function collectSkillFiles(roots, maxScan) {
@@ -147,11 +182,14 @@ export function loadSkillBody(skillPath) {
  * 列出所有已发现的技能（仅元数据）
  */
 export function listDiscoveredSkills(options = {}) {
-  const skillsDir = options.skillsDir || process.env.TELEGRAM_SKILLS_DIR || "";
-  const maxScan = Math.max(20, Number(options.maxScan || process.env.TELEGRAM_MAX_SKILL_SCAN) || DEFAULT_MAX_SCAN);
+  const configuredSkillDirs = resolveConfiguredSkillDirs(options);
+  const maxScan = Math.max(
+    20,
+    Number(options.maxScan || process.env.AGENT_MAX_SKILL_SCAN || process.env.TELEGRAM_MAX_SKILL_SCAN) || DEFAULT_MAX_SCAN
+  );
   // We don't need maxSnippetChars for listing anymore, we just need enough to read frontmatter
   
-  const skillRoots = listSkillRoots(skillsDir);
+  const skillRoots = listSkillRoots(configuredSkillDirs);
   if (!skillRoots.length) return [];
   const skillFiles = collectSkillFiles(skillRoots, maxScan);
   return buildCatalog(skillFiles, 2000).sort((a, b) => a.name.localeCompare(b.name));
@@ -166,4 +204,3 @@ export function formatSkillContext(skills = []) {
   }
   return lines.join("\n");
 }
-

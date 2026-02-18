@@ -12,15 +12,31 @@ export class Perception {
   constructor(config = {}) {
     this.config = config;
     this._allSkills = null;
+    this._skillsLoadedAt = 0;
+    this.skillRefreshMs = this._toSafeInt(
+      config.skillRefreshMs ?? process.env.AGENT_SKILLS_REFRESH_MS ?? process.env.TELEGRAM_SKILLS_REFRESH_MS,
+      3000
+    );
     this._soul = null;
     this._workspace = null;
   }
 
   _getSkills() {
-    if (!this._allSkills) {
-      this._allSkills = listDiscoveredSkills({ skillsDir: this.config.skillsDir });
+    const now = Date.now();
+    const expired = now - this._skillsLoadedAt >= this.skillRefreshMs;
+    if (!this._allSkills || expired) {
+      this._allSkills = listDiscoveredSkills({
+        skillsDir: this.config.skillsDir,
+        skillsDirs: this.config.skillsDirs
+      });
+      this._skillsLoadedAt = now;
     }
     return this._allSkills;
+  }
+
+  _toSafeInt(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
   }
 
   _getSoul() {
@@ -230,7 +246,7 @@ Rules:
     if (skills && skills.length > 0) {
       const skillDocs = skills.map(s => {
         // 尝试从 SKILL.md 中提取具体的锦囊
-        const skillPath = path.join(this.config.skillsDir, s.name, "SKILL.md");
+        const skillPath = s.path;
         let extra = "";
         try {
           if (fs.existsSync(skillPath)) {
