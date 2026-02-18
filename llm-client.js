@@ -93,7 +93,7 @@ export class HttpLLMClient extends LLMClient {
    */
   async chatCompletion(messages, options = {}) {
     if (!this.endpoint) {
-      throw new Error(`LLM endpoint is missing. Please check your .env configuration (OPENAI_COMPAT_BASE_URL or AGENT_ROUTER_BASE_URL).`);
+      throw new Error("LLM endpoint is missing. Please check your .env configuration (KUAFU_ROUTER_BASE_URL or OPENAI_COMPAT_BASE_URL).");
     }
 
     const allowTools = options.allowTools !== false;

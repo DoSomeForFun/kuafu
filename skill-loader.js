@@ -91,14 +91,23 @@ function resolveConfiguredSkillDirs(options = {}) {
 }
 
 function collectSkillFiles(roots, maxScan) {
-  const files = [];
+  const entries = [];
   for (const root of roots) {
-    const remaining = maxScan - files.length;
+    const remaining = maxScan - entries.length;
     if (remaining <= 0) break;
     const isBuiltin = path.resolve(root) === path.resolve(BUILTIN_SKILLS_DIR);
-    files.push(...walkSkillFiles(root, remaining, { isBuiltin }));
+    const files = walkSkillFiles(root, remaining, { isBuiltin });
+    for (const filePath of files) {
+      entries.push({ filePath, isBuiltin });
+    }
   }
-  return [...new Set(files)];
+
+  const unique = new Map();
+  for (const entry of entries) {
+    if (!entry?.filePath) continue;
+    if (!unique.has(entry.filePath)) unique.set(entry.filePath, entry);
+  }
+  return [...unique.values()];
 }
 
 function readSkillSnippet(filePath, maxChars = DEFAULT_SNIPPET_CHARS) {
@@ -142,9 +151,12 @@ function parseFrontmatter(content) {
   return metadata;
 }
 
-function buildCatalog(skillFiles, maxChars) {
-  return skillFiles
-    .map((filePath) => {
+function buildCatalog(skillEntries, maxChars) {
+  return skillEntries
+    .map((entry) => {
+      const filePath = typeof entry === "string" ? entry : entry?.filePath;
+      const isBuiltin = typeof entry === "object" ? Boolean(entry?.isBuiltin) : false;
+      if (!filePath) return null;
       // Only read the first 2000 chars for metadata parsing
       const snippet = readSkillSnippet(filePath, 2000); 
       if (!snippet) return null;
@@ -154,11 +166,18 @@ function buildCatalog(skillFiles, maxChars) {
       
       const name = frontmatter.name || dirName;
       const description = frontmatter.description || inferDescription(snippet);
+      const entryFile = String(frontmatter.entry || "run.sh").trim();
+      const argsMode = String(frontmatter.args || frontmatter.args_mode || "json").trim().toLowerCase();
 
       return {
         name,
         path: filePath,
         description,
+        entry: entryFile,
+        argsMode,
+        metadata: frontmatter,
+        isBuiltin,
+        source: isBuiltin ? "builtin" : "external"
         // No full snippet loaded initially
       };
     })

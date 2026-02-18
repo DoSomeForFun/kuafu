@@ -159,7 +159,13 @@ export class Store {
   }
 
   async searchRelevant(input) {
-    const { embedding, limit = 5, filterByTaskId } = input;
+    const {
+      embedding,
+      limit = 5,
+      filterByTaskId,
+      filterByTaskIds,
+      filterByTaskIdPrefix
+    } = input;
     if (!embedding) return [];
     let sql = `
       SELECT message_id, task_id, sender_id, content, distance
@@ -170,6 +176,15 @@ export class Store {
     if (filterByTaskId) {
       sql += " AND task_id = ?";
       params.push(filterByTaskId);
+    }
+    if (Array.isArray(filterByTaskIds) && filterByTaskIds.length > 0) {
+      const placeholders = filterByTaskIds.map(() => "?").join(", ");
+      sql += ` AND task_id IN (${placeholders})`;
+      params.push(...filterByTaskIds);
+    }
+    if (filterByTaskIdPrefix) {
+      sql += " AND task_id LIKE ?";
+      params.push(`${String(filterByTaskIdPrefix)}%`);
     }
     sql += " ORDER BY distance ASC";
 

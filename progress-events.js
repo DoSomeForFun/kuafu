@@ -1,12 +1,13 @@
-const EVENT_TYPES = {
-  RUN_STARTED: "run_started",
-  STEP_STARTED: "step_started",
-  TOOL_STARTED: "tool_started",
-  TOOL_HEARTBEAT: "tool_heartbeat",
-  TOOL_FINISHED: "tool_finished",
-  RUN_FINISHED: "run_finished",
-  RUN_FAILED: "run_failed"
-};
+import {
+  EVENT_TYPES,
+  PROGRESS_PROTOCOL,
+  PROGRESS_PROTOCOL_VERSION,
+  PROGRESS_PROTOCOL_CAPABILITIES,
+  PROGRESS_EVENT_SCHEMA,
+  PROGRESS_EVENT_JSON_SCHEMA,
+  normalizeProgressEvent,
+  validateProgressEvent
+} from "./protocol/events.js";
 
 function toSafeInt(value, fallback) {
   const n = Number(value);
@@ -18,13 +19,13 @@ export function getProgressHeartbeatMs() {
 }
 
 export function createProgressEvent(base, type, payload = {}) {
-  return {
+  return normalizeProgressEvent({
     type,
     taskId: base.taskId,
     sessionId: base.sessionId,
     ts: new Date().toISOString(),
     ...payload
-  };
+  });
 }
 
 export function normalizeProgressSink(progressSink) {
@@ -38,4 +39,13 @@ export function normalizeProgressSink(progressSink) {
   return { emit: () => { } };
 }
 
-export { EVENT_TYPES };
+export {
+  EVENT_TYPES,
+  PROGRESS_PROTOCOL,
+  PROGRESS_PROTOCOL_VERSION,
+  PROGRESS_PROTOCOL_CAPABILITIES,
+  PROGRESS_EVENT_SCHEMA,
+  PROGRESS_EVENT_JSON_SCHEMA,
+  normalizeProgressEvent,
+  validateProgressEvent
+};

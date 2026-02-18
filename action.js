@@ -112,6 +112,134 @@ export class Action {
     } catch (e) { return { ok: false, error: e.message }; }
   }
 
+  async invokeTool(name, args = {}) {
+    const toolName = String(name || "").trim();
+    if (!toolName) return { ok: false, error: "Tool name is required." };
+
+    if (this._isBuiltinTool(toolName)) {
+      if (typeof this[toolName] !== "function") {
+        return { ok: false, error: `Builtin tool ${toolName} is not callable.` };
+      }
+      return this[toolName](args);
+    }
+
+    return this._invokeSkillTool(toolName, args);
+  }
+
+  _isBuiltinTool(name) {
+    return this.getSpecs().some((spec) => spec?.function?.name === name);
+  }
+
+  _selectSkillCandidate(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
+    const preferNonBuiltin = candidates.find((skill) => !skill?.isBuiltin);
+    return preferNonBuiltin || candidates[0];
+  }
+
+  _assertSkillEntryPath(skillRoot, entryRel) {
+    if (!entryRel) throw new Error("Skill entry is empty.");
+    if (path.isAbsolute(entryRel)) {
+      throw new Error(`Skill entry must be relative, got absolute path: ${entryRel}`);
+    }
+    const resolved = path.resolve(skillRoot, entryRel);
+    const normalizedRoot = path.resolve(skillRoot);
+    if (resolved !== normalizedRoot && !resolved.startsWith(`${normalizedRoot}${path.sep}`)) {
+      throw new Error(`Skill entry escapes skill directory: ${entryRel}`);
+    }
+    return resolved;
+  }
+
+  _shellQuote(value) {
+    const s = String(value ?? "");
+    return `'${s.replace(/'/g, `'\"'\"'`)}'`;
+  }
+
+  _buildArgvPairs(args) {
+    const pairs = [];
+    const obj = args && typeof args === "object" ? args : {};
+    for (const [rawKey, rawValue] of Object.entries(obj)) {
+      const key = String(rawKey || "").trim();
+      if (!key) continue;
+      const cliKey = `--${key.replace(/_/g, "-")}`;
+      if (typeof rawValue === "boolean") {
+        if (rawValue) pairs.push(cliKey);
+        continue;
+      }
+      if (rawValue === null || rawValue === undefined) continue;
+      const value = typeof rawValue === "object" ? JSON.stringify(rawValue) : String(rawValue);
+      pairs.push(`${cliKey} ${this._shellQuote(value)}`);
+    }
+    return pairs.join(" ");
+  }
+
+  _buildSkillCommand(entryPath, args, argsMode) {
+    const quotedEntry = this._shellQuote(entryPath);
+    const mode = String(argsMode || "json").toLowerCase();
+    if (mode === "json") {
+      const params = JSON.stringify(args && typeof args === "object" ? args : {});
+      return `bash ${quotedEntry} --params ${this._shellQuote(params)}`;
+    }
+    if (mode === "argv") {
+      const argv = this._buildArgvPairs(args);
+      return argv ? `bash ${quotedEntry} ${argv}` : `bash ${quotedEntry}`;
+    }
+    if (mode === "raw") {
+      const rawCommand = String(args?.command || "").trim();
+      if (!rawCommand) {
+        throw new Error("raw args mode requires arguments.command.");
+      }
+      return `bash ${quotedEntry} ${rawCommand}`;
+    }
+    throw new Error(`Unsupported skill args mode: ${mode}`);
+  }
+
+  async _invokeSkillTool(toolName, args = {}) {
+    const allSkills = listDiscoveredSkills({
+      skillsDir: process.env.AGENT_SKILLS_DIR || process.env.TELEGRAM_SKILLS_DIR,
+      skillsDirs: process.env.AGENT_SKILLS_DIRS
+    });
+    const lowerName = toolName.toLowerCase();
+    const matches = allSkills.filter((skill) => String(skill.name || "").toLowerCase() === lowerName);
+    if (matches.length === 0) {
+      return { ok: false, error: `Tool ${toolName} not found.` };
+    }
+
+    const skill = this._selectSkillCandidate(matches);
+    const skillRoot = path.dirname(skill.path);
+    const entryRel = String(skill.entry || "run.sh").trim();
+    let entryPath = "";
+    try {
+      entryPath = this._assertSkillEntryPath(skillRoot, entryRel);
+    } catch (error) {
+      return { ok: false, error: `[skill:${skill.name}] ${error.message}` };
+    }
+
+    if (!fs.existsSync(entryPath)) {
+      return {
+        ok: false,
+        error: `[skill:${skill.name}] entry not found: ${entryPath}. Add frontmatter entry or create run.sh.`
+      };
+    }
+
+    let command = "";
+    try {
+      command = this._buildSkillCommand(entryPath, args, skill.argsMode || "json");
+    } catch (error) {
+      return { ok: false, error: `[skill:${skill.name}] ${error.message}` };
+    }
+
+    const result = await this.bash({ command });
+    return {
+      ...result,
+      skill: {
+        name: skill.name,
+        path: skill.path,
+        entry: entryRel,
+        argsMode: skill.argsMode || "json"
+      }
+    };
+  }
+
   async bash(args) {
     const OUTPUT_LIMIT = 3000;
     const maxRetries = this.bashRetryMax;

@@ -4,7 +4,7 @@ import { Action } from "./action.js";
 import { ExperienceJournal } from "./experience.js";
 import { createLLMClient } from "./llm-client.js";
 import { telemetry, runWithTrace } from "./telemetry.js";
-import { createProgressEvent, EVENT_TYPES, getProgressHeartbeatMs, normalizeProgressSink } from "./progress-events.js";
+import { createProgressEvent, EVENT_TYPES, getProgressHeartbeatMs, normalizeProgressSink, validateProgressEvent } from "./progress-events.js";
 import { getRoutingModelConfig } from "./routing-config.js";
 
 /**
@@ -19,6 +19,10 @@ export class Kernel {
     this.progressSink = normalizeProgressSink(options.progressSink);
     this._llmClient = null;
     this._llmClientKey = null;
+    this._intentRouterCircuit = {
+      failures: [],
+      openedUntil: 0
+    };
   }
 
   getOutputSchema() {
@@ -228,7 +232,7 @@ export class Kernel {
 
     const heuristicSimpleChat = this._isLikelyChitchat(promptToUse);
     let isSimpleChat = heuristicSimpleChat;
-    if (stepCount <= 0 && !heuristicSimpleChat) {
+    if (stepCount <= 0) {
       isSimpleChat = await this._classifySimpleChatWithRouter(promptToUse, heuristicSimpleChat);
     }
 
@@ -496,9 +500,89 @@ export class Kernel {
     return false;
   }
 
+  _readPositiveIntEnv(name, fallback, min = 1) {
+    const raw = Number(process.env[name]);
+    if (!Number.isFinite(raw)) return fallback;
+    return Math.max(min, Math.floor(raw));
+  }
+
+  _getIntentRouterPolicy() {
+    return {
+      enabled: String(process.env.AGENT_INTENT_ROUTER_ENABLED || "true") !== "false",
+      timeoutMs: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_TIMEOUT_MS", 1200, 200),
+      circuitEnabled: String(process.env.AGENT_INTENT_ROUTER_CIRCUIT_ENABLED || "true") !== "false",
+      failThreshold: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_CIRCUIT_FAIL_THRESHOLD", 3, 1),
+      windowMs: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_CIRCUIT_WINDOW_MS", 60000, 1000),
+      cooldownMs: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_CIRCUIT_COOLDOWN_MS", 30000, 1000)
+    };
+  }
+
+  _classifyIntentRouterFailureReason(errorText) {
+    const text = String(errorText || "").toLowerCase();
+    if (!text) return "unknown";
+    if (text.includes("intent-router-timeout") || text.includes("timeout") || text.includes("timed out")) return "timeout";
+    if (text.includes("response_format") || text.includes("json_schema") || text.includes("schema")) return "schema_compat";
+    if (/econn|enotfound|eai_again|network|socket|503|502|504|429/.test(text)) return "network";
+    if (text.includes("parse") || text.includes("json")) return "response_parse";
+    return "unknown";
+  }
+
+  _logIntentRouterFallback(reason, extra = {}) {
+    telemetry.warn("[Kernel] Intent router fallback to heuristic", {
+      degradeTag: reason === "circuit_open" ? "intent_router_circuit_open" : "intent_router_fallback",
+      fallbackReason: reason,
+      ...extra
+    });
+  }
+
+  _pruneIntentRouterFailures(windowMs, now) {
+    this._intentRouterCircuit.failures = this._intentRouterCircuit.failures.filter((ts) => now - ts <= windowMs);
+    return this._intentRouterCircuit.failures.length;
+  }
+
+  _isIntentRouterCircuitOpen(policy, now = Date.now()) {
+    if (!policy.circuitEnabled) return false;
+    const openedUntil = Number(this._intentRouterCircuit.openedUntil || 0);
+    if (!openedUntil) return false;
+    if (now < openedUntil) return true;
+    this._intentRouterCircuit.openedUntil = 0;
+    this._intentRouterCircuit.failures = [];
+    telemetry.info("[Kernel] Intent router circuit closed; resume normal classification");
+    return false;
+  }
+
+  _recordIntentRouterFailure(policy, reason, now = Date.now()) {
+    if (!policy.circuitEnabled) return false;
+    this._intentRouterCircuit.failures.push(now);
+    const count = this._pruneIntentRouterFailures(policy.windowMs, now);
+    if (count < policy.failThreshold) return false;
+
+    this._intentRouterCircuit.openedUntil = now + policy.cooldownMs;
+    telemetry.warn("[Kernel] Intent router circuit opened", {
+      degradeTag: "intent_router_circuit_open",
+      fallbackReason: reason,
+      failuresInWindow: count,
+      failThreshold: policy.failThreshold,
+      windowMs: policy.windowMs,
+      cooldownMs: policy.cooldownMs
+    });
+    return true;
+  }
+
+  _recordIntentRouterSuccess() {
+    if ((this._intentRouterCircuit.failures?.length || 0) > 0 || this._intentRouterCircuit.openedUntil > 0) {
+      this._intentRouterCircuit.failures = [];
+      this._intentRouterCircuit.openedUntil = 0;
+      telemetry.info("[Kernel] Intent router failure window reset after successful classification");
+    }
+  }
+
   async _classifySimpleChatWithRouter(prompt, fallbackValue) {
-    const enabled = String(process.env.AGENT_INTENT_ROUTER_ENABLED || "true") !== "false";
-    if (!enabled) return fallbackValue;
+    const policy = this._getIntentRouterPolicy();
+    if (!policy.enabled) {
+      this._logIntentRouterFallback("router_disabled");
+      return fallbackValue;
+    }
 
     const text = String(prompt || "")
       .split("\n")
@@ -513,9 +597,21 @@ export class Kernel {
     if (!text) return true;
 
     const routingConfig = getRoutingModelConfig();
-    if (!routingConfig.model) return fallbackValue;
+    if (!routingConfig.model) {
+      this._logIntentRouterFallback("router_unconfigured", {
+        routerSource: routingConfig?.source?.model || ""
+      });
+      return fallbackValue;
+    }
 
-    const timeoutMs = Math.max(200, Number(process.env.AGENT_INTENT_ROUTER_TIMEOUT_MS || 1200));
+    if (this._isIntentRouterCircuitOpen(policy)) {
+      this._logIntentRouterFallback("circuit_open", {
+        circuitOpenUntil: this._intentRouterCircuit.openedUntil
+      });
+      return fallbackValue;
+    }
+
+    const timeoutMs = policy.timeoutMs;
     const systemPrompt = `You are an intent classifier. Classify the user message as either:
 - chitchat: greeting, social ping, small talk, emotional reaction, acknowledgement
 - task: request requiring concrete information retrieval, analysis, editing, execution, or tool usage
@@ -552,13 +648,30 @@ Output JSON only:
       const raw = content.match(/\{[\s\S]*\}/)?.[0] || "{}";
       const parsed = JSON.parse(raw);
       const intent = String(parsed.intent || "").toLowerCase();
-      if (intent === "chitchat") return true;
-      if (intent === "task") return false;
+      if (intent === "chitchat") {
+        this._recordIntentRouterSuccess();
+        return true;
+      }
+      if (intent === "task") {
+        this._recordIntentRouterSuccess();
+        return false;
+      }
+      const reason = "response_parse";
+      const opened = this._recordIntentRouterFailure(policy, reason);
+      this._logIntentRouterFallback(reason, {
+        routerSource: routingConfig?.source?.model || "",
+        circuitOpened: opened
+      });
       return fallbackValue;
     } catch (error) {
       if (timer) clearTimeout(timer);
-      telemetry.warn("[Kernel] Intent router classification failed; fallback to heuristic", {
-        error: error?.message || String(error)
+      const errorText = error?.message || String(error);
+      const reason = this._classifyIntentRouterFailureReason(errorText);
+      const opened = this._recordIntentRouterFailure(policy, reason);
+      this._logIntentRouterFallback(reason, {
+        error: errorText,
+        routerSource: routingConfig?.source?.model || "",
+        circuitOpened: opened
       });
       return fallbackValue;
     }
@@ -863,19 +976,27 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
     let args = {};
     try { args = typeof fnArgs === "string" ? JSON.parse(fnArgs) : fnArgs; } catch { }
 
-    if (!this.action[fnName]) return { ok: false, error: `Tool ${fnName} not found.` };
-
     const TRANSIENT = /timeout|timed out|etimedout|econnrefused|econnreset|econnaborted|epipe|network|socket hang up|503|502|504|429|temporar(?:y|ily)|resource busy|text file busy|permission denied|operation not permitted|eacces|eperm/i;
     const MAX_RETRIES = 1;
 
-    let result = await this.action[fnName](args);
+    const invoke = async () => {
+      if (typeof this.action.invokeTool === "function") {
+        return this.action.invokeTool(fnName, args);
+      }
+      if (typeof this.action[fnName] === "function") {
+        return this.action[fnName](args);
+      }
+      return { ok: false, error: `Tool ${fnName} not found.` };
+    };
+
+    let result = await invoke();
     const errorText = `${result.error || ""}\n${result.stderr || ""}`;
     const alreadyRetried = Boolean(result.retryInfo?.exhausted);
     if (!result.ok && !alreadyRetried && TRANSIENT.test(errorText)) {
       for (let i = 0; i < MAX_RETRIES; i++) {
         telemetry.warn(`[Kernel] Transient error detected, auto-retry ${i + 1}/${MAX_RETRIES}`, { tool: fnName, error: result.error });
         await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-        result = await this.action[fnName](args);
+        result = await invoke();
         if (result.ok) break;
       }
     }
@@ -942,6 +1063,14 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
     try {
       const sink = normalizeProgressSink(context?.progressSink || this.progressSink);
       const event = createProgressEvent({ taskId: context?.taskId, sessionId: context?.sessionId }, type, payload);
+      const validation = validateProgressEvent(event, { strict: true });
+      if (!validation.ok) {
+        telemetry.warn("[Kernel] progress event schema validation failed", {
+          type,
+          errors: validation.errors
+        });
+        return;
+      }
       const maybePromise = sink.emit(event);
       if (maybePromise?.catch) {
         maybePromise.catch((err) => telemetry.warn("[Kernel] progress sink emit failed", { error: err?.message || String(err) }));

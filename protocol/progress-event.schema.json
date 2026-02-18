@@ -1,0 +1,376 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kuafu.dev/schemas/progress-event-v1.json",
+  "title": "Kuafu ProgressEvent v1",
+  "description": "Transport-agnostic runtime progress event protocol.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "taskId",
+        "sessionId",
+        "ts",
+        "version",
+        "capabilities",
+        "status"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "run_started"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string"
+        },
+        "maxSteps": {
+          "type": "number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "taskId",
+        "sessionId",
+        "ts",
+        "version",
+        "capabilities",
+        "step"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "step_started"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "step": {
+          "type": "number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "taskId",
+        "sessionId",
+        "ts",
+        "version",
+        "capabilities",
+        "step",
+        "toolName",
+        "toolIndex",
+        "toolTotal"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_started"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "step": {
+          "type": "number"
+        },
+        "toolName": {
+          "type": "string"
+        },
+        "toolIndex": {
+          "type": "number"
+        },
+        "toolTotal": {
+          "type": "number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "taskId",
+        "sessionId",
+        "ts",
+        "version",
+        "capabilities",
+        "step",
+        "toolName",
+        "toolIndex",
+        "toolTotal",
+        "heartbeatCount",
+        "durationMs"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_heartbeat"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "step": {
+          "type": "number"
+        },
+        "toolName": {
+          "type": "string"
+        },
+        "toolIndex": {
+          "type": "number"
+        },
+        "toolTotal": {
+          "type": "number"
+        },
+        "heartbeatCount": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "taskId",
+        "sessionId",
+        "ts",
+        "version",
+        "capabilities",
+        "step",
+        "toolName",
+        "toolIndex",
+        "toolTotal",
+        "ok",
+        "durationMs"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "tool_finished"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "step": {
+          "type": "number"
+        },
+        "toolName": {
+          "type": "string"
+        },
+        "toolIndex": {
+          "type": "number"
+        },
+        "toolTotal": {
+          "type": "number"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "durationMs": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        },
+        "retryInfo": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "taskId",
+        "sessionId",
+        "ts",
+        "version",
+        "capabilities",
+        "status",
+        "steps",
+        "durationMs"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "run_finished"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "type",
+        "taskId",
+        "sessionId",
+        "ts",
+        "version",
+        "capabilities",
+        "status",
+        "error",
+        "steps",
+        "durationMs"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "run_failed"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "version": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "number"
+        },
+        "durationMs": {
+          "type": "number"
+        }
+      }
+    }
+  ]
+}
