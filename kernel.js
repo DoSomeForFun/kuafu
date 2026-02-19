@@ -996,7 +996,6 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
     const endpoint = config.endpoint || this._getEnv("BASE_URL");
     const apiKey = config.apiKey || this._getEnv("API_KEY");
     const model = config.model || this._getEnv("MODEL");
-
     let finalEndpoint = endpoint;
     let finalApiKey = apiKey;
     const timeoutMs = this._resolveLlmTimeoutMs(config);

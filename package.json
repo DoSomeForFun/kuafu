@@ -10,7 +10,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@iflow-ai/iflow-cli-sdk": "^0.1.9",
     "better-sqlite3": "^12.6.2",
     "pino": "^10.3.1",
     "pino-pretty": "^13.1.3",
