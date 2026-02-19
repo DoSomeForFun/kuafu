@@ -72,7 +72,7 @@ export class Perception {
     // 优先使用语义路由，如果配置了 Router Model；否则降级到关键词路由
     let skills = [];
     try {
-      skills = await this.routeSkillsSemantic(prompt, input.requestChatCompletion);
+      skills = await this.routeSkillsSemantic(prompt, input.requestChatCompletion, input.routerTimeoutMs);
     } catch (e) {
       telemetry.warn("[Perception] Semantic routing failed, falling back to keywords.", { error: e?.message || String(e) });
       skills = this.routeSkills(prompt);
@@ -132,7 +132,7 @@ export class Perception {
   /**
    * 语义路由：利用 LLM 理解意图，选择相关技能
    */
-  async routeSkillsSemantic(prompt, chatFunc) {
+  async routeSkillsSemantic(prompt, chatFunc, routerTimeoutMs) {
     const allSkills = this._getSkills();
     if (!allSkills.length) return [];
 
@@ -155,7 +155,11 @@ Rules:
     const config = getRoutingModelConfig();
 
     // Use a lightweight call
-    const response = await chatFunc(config, [
+    const resolvedConfig = Number.isFinite(Number(routerTimeoutMs))
+      ? { ...config, timeoutMs: Number(routerTimeoutMs) }
+      : config;
+
+    const response = await chatFunc(resolvedConfig, [
       { role: "system", content: systemPrompt },
       { role: "user", content: "Select skills." }
     ], {

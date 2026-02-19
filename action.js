@@ -16,7 +16,11 @@ export class Action {
     this.sandboxBase = path.join(this.projectRoot, ".huluwa/sandboxes");
     this.cwd = this.projectRoot;
     this.sandboxPath = null;
-    this.timeoutMs = options.timeoutMs || 120000;
+    const timeoutFromEnv = this._toSafeInt(
+      process.env.KUAFU_TOOL_TIMEOUT_MS ?? process.env.AGENT_TOOL_TIMEOUT_MS,
+      120000
+    );
+    this.timeoutMs = options.timeoutMs ?? timeoutFromEnv;
     this.bashRetryMax = this._toSafeInt(options.bashRetryMax ?? process.env.TELEGRAM_BASH_RETRY_MAX, 1);
     this.bashRetryBaseDelayMs = this._toSafeInt(options.bashRetryBaseDelayMs ?? process.env.TELEGRAM_BASH_RETRY_BASE_DELAY_MS, 800);
     this.bashRetryMaxDelayMs = this._toSafeInt(options.bashRetryMaxDelayMs ?? process.env.TELEGRAM_BASH_RETRY_MAX_DELAY_MS, 4000);

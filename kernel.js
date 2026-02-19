@@ -15,7 +15,10 @@ export class Kernel {
   constructor(options = {}) {
     this.store = options.store || options.backend;
     this.chatCompletionOverride = options.chatCompletion;
-    this.action = options.action || new Action({ cwd: options.workdir });
+    this.action = options.action || new Action({
+      cwd: options.workdir,
+      timeoutMs: this._resolveToolTimeoutMs()
+    });
     this.progressSink = normalizeProgressSink(options.progressSink);
     this._llmClient = null;
     this._llmClientKey = null;
@@ -23,6 +26,9 @@ export class Kernel {
       failures: [],
       openedUntil: 0
     };
+    this._stepSlaEnabled = String(process.env.AGENT_STEP_SLA_ENABLED || "true") !== "false";
+    this._stepSlaWindowSize = this._readPositiveIntEnv("AGENT_STEP_SLA_WINDOW_SIZE", 200, 10);
+    this._stepSlaSamples = [];
   }
 
   getOutputSchema() {
@@ -90,7 +96,8 @@ export class Kernel {
           stepCount: 0,
           progressSink: resolvedProgressSink,
           progressHeartbeatMs: getProgressHeartbeatMs(),
-          runStartTime: Date.now()
+          runStartTime: Date.now(),
+          stepSlaSamples: []
         };
         const span = telemetry.startSpan("Kernel.run");
         try {
@@ -195,10 +202,20 @@ export class Kernel {
           }).catch(e => telemetry.warn("[Kernel] Journal flush failed", { error: e.message }));
 
           span.end({ status: context.finalResult?.status || "DONE" });
+          const stepSla = this._getStepSlaSnapshot();
+          if (stepSla.count > 0) {
+            telemetry.info("[Kernel] Step SLA snapshot", stepSla);
+          }
+          if (context.finalResult && stepSla.count > 0) {
+            context.finalResult.stepSla = stepSla;
+          }
           this._emitProgress(context, EVENT_TYPES.RUN_FINISHED, {
             status: context.finalResult?.status || "DONE",
             steps: context.stepCount,
-            durationMs: Date.now() - context.runStartTime
+            durationMs: Date.now() - context.runStartTime,
+            stepP50Ms: stepSla.p50Ms,
+            stepP95Ms: stepSla.p95Ms,
+            stepSampleCount: stepSla.count
           });
           resolve(context.finalResult || { status: "DONE" });
         } catch (error) {
@@ -245,6 +262,7 @@ export class Kernel {
 
     const sensoryData = await perception.gather({
       prompt: promptToUse, task, retrievedContext, sessionId, taskId,
+      routerTimeoutMs: this._resolveRouterTimeoutMs(),
       isSimpleChat,
       requestChatCompletion: this._chat.bind(this),
       extractText: (json) => json.content || "",
@@ -271,6 +289,7 @@ export class Kernel {
     
     const stepSpan = telemetry.startSpan(`Step.${stepCount}`);
     const startTime = Date.now();
+    context.stepStartedAt = startTime;
 
     // Time-Slicing Context Filter
     // 1. Fetch raw messages (limit is slightly larger than maxHistory to allow filtering)
@@ -420,9 +439,11 @@ export class Kernel {
       telemetry.warn(`[Kernel] 🛡️ 拦截到空谈或需要重试。正在打回...`, { hint: advice.promptHint });
       context.turnHint = advice.promptHint;
       stepSpan.end({ status: "INTERCEPTED" });
+      this._recordStepSla(context, "INTERCEPTED");
       context.state = "THINKING"; // Loop back
     } else if (advice.nextAction === "STOP") {
       stepSpan.end({ status: advice.status });
+      this._recordStepSla(context, advice.status);
       context.finalResult = { status: advice.status, turnResult, message: advice.message };
       
       // Auto-Reflection Trigger
@@ -506,10 +527,93 @@ export class Kernel {
     return Math.max(min, Math.floor(raw));
   }
 
+  _readFirstPositiveIntEnv(names, fallback, min = 1) {
+    for (const name of names) {
+      const value = process.env[name];
+      if (value === undefined || value === null || String(value).trim() === "") continue;
+      return this._readPositiveIntEnv(name, fallback, min);
+    }
+    return fallback;
+  }
+
+  _resolveRouterTimeoutMs() {
+    return this._readFirstPositiveIntEnv(
+      ["KUAFU_ROUTER_TIMEOUT_MS", "AGENT_ROUTER_TIMEOUT_MS", "AGENT_INTENT_ROUTER_TIMEOUT_MS"],
+      1200,
+      200
+    );
+  }
+
+  _resolveToolTimeoutMs() {
+    return this._readFirstPositiveIntEnv(
+      ["KUAFU_TOOL_TIMEOUT_MS", "AGENT_TOOL_TIMEOUT_MS"],
+      120000,
+      500
+    );
+  }
+
+  _resolveLlmTimeoutMs(config = {}) {
+    const override = Number(config?.timeoutMs);
+    if (Number.isFinite(override) && override >= 200) return Math.floor(override);
+    return this._readFirstPositiveIntEnv(
+      ["KUAFU_LLM_TIMEOUT_MS", "AGENT_LLM_TIMEOUT_MS"],
+      120000,
+      500
+    );
+  }
+
+  _percentile(values, p) {
+    if (!Array.isArray(values) || values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const ratio = Math.max(0, Math.min(1, Number(p) || 0));
+    const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1);
+    return sorted[Math.max(index, 0)];
+  }
+
+  _getStepSlaSnapshot() {
+    const durations = this._stepSlaSamples.map((row) => row.durationMs).filter((n) => Number.isFinite(n) && n >= 0);
+    if (durations.length === 0) {
+      return { count: 0, p50Ms: 0, p95Ms: 0 };
+    }
+    return {
+      count: durations.length,
+      p50Ms: this._percentile(durations, 0.5),
+      p95Ms: this._percentile(durations, 0.95)
+    };
+  }
+
+  _recordStepSla(context, status) {
+    if (!this._stepSlaEnabled) return;
+    const startedAt = Number(context?.stepStartedAt || 0);
+    if (!Number.isFinite(startedAt) || startedAt <= 0) return;
+    const step = Number(context?.stepCount || 0);
+    if (!Number.isFinite(step) || step <= 0) return;
+
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    const sample = {
+      ts: Date.now(),
+      taskId: context?.taskId,
+      step,
+      status: String(status || ""),
+      durationMs
+    };
+
+    this._stepSlaSamples.push(sample);
+    if (this._stepSlaSamples.length > this._stepSlaWindowSize) {
+      this._stepSlaSamples.splice(0, this._stepSlaSamples.length - this._stepSlaWindowSize);
+    }
+
+    if (Array.isArray(context?.stepSlaSamples)) {
+      context.stepSlaSamples.push(sample);
+    }
+    context.stepStartedAt = 0;
+    context.lastStepDurationMs = durationMs;
+  }
+
   _getIntentRouterPolicy() {
     return {
       enabled: String(process.env.AGENT_INTENT_ROUTER_ENABLED || "true") !== "false",
-      timeoutMs: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_TIMEOUT_MS", 1200, 200),
+      timeoutMs: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_TIMEOUT_MS", this._resolveRouterTimeoutMs(), 200),
       circuitEnabled: String(process.env.AGENT_INTENT_ROUTER_CIRCUIT_ENABLED || "true") !== "false",
       failThreshold: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_CIRCUIT_FAIL_THRESHOLD", 3, 1),
       windowMs: this._readPositiveIntEnv("AGENT_INTENT_ROUTER_CIRCUIT_WINDOW_MS", 60000, 1000),
@@ -621,7 +725,7 @@ Output JSON only:
 
     let timer = null;
     try {
-      const classifyPromise = this._chat(routingConfig, [
+      const classifyPromise = this._chat({ ...routingConfig, timeoutMs }, [
         { role: "system", content: systemPrompt },
         { role: "user", content: text }
       ], {
@@ -763,6 +867,7 @@ Output JSON only:
     }
 
     stepSpan.end({ status: advice.nextAction });
+    this._recordStepSla(context, advice.nextAction);
 
     if (needsReroute) {
       context.isReroute = true;
@@ -894,6 +999,7 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
 
     let finalEndpoint = endpoint;
     let finalApiKey = apiKey;
+    const timeoutMs = this._resolveLlmTimeoutMs(config);
 
     if (config.model && config.model === process.env.AGENT_CHAT_MODEL) {
       if (!config.endpoint && process.env.AGENT_CHAT_BASE_URL) finalEndpoint = process.env.AGENT_CHAT_BASE_URL;
@@ -906,7 +1012,8 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
       endpoint: finalEndpoint,
       apiKey: finalApiKey,
       model,
-      toolsKey
+      toolsKey,
+      timeoutMs
     });
 
     if (!this._llmClient || this._llmClientKey !== clientKey) {
@@ -914,7 +1021,7 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
         endpoint: finalEndpoint,
         apiKey: finalApiKey,
         model,
-        timeoutMs: 120000,
+        timeoutMs,
         tools: toolSpecs,
         toolsEnabled: true
       });
@@ -972,6 +1079,7 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
   async _executeAction(tc) {
     const fnName = tc.function?.name || tc.name;
     const fnArgs = tc.function?.arguments || tc.arguments;
+    this.action.timeoutMs = this._resolveToolTimeoutMs();
 
     let args = {};
     try { args = typeof fnArgs === "string" ? JSON.parse(fnArgs) : fnArgs; } catch { }
