@@ -84,7 +84,7 @@ export class Kernel {
   }
 
   async run(options) {
-    const { taskId, prompt: originalPrompt, sessionId, maxSteps = 30, retrievedContext = [], onStep, maxHistory = 10, progressSink } = options;
+    const { taskId, prompt: originalPrompt, sessionId, maxSteps = 30, retrievedContext = [], onStep, maxHistory = 10, progressSink, isSimpleChat: forceSimpleChat, promptEmbedding } = options;
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
     const resolvedProgressSink = normalizeProgressSink(progressSink || this.progressSink);
 
@@ -101,7 +101,6 @@ export class Kernel {
         };
         const span = telemetry.startSpan("Kernel.run");
         try {
-          // --- INIT State ---
           const task = await this.store.getTaskById(taskId);
           if (!task) throw new Error(`Task not found: ${taskId}`);
 
@@ -111,7 +110,8 @@ export class Kernel {
             skillsDirs: process.env.AGENT_SKILLS_DIRS
           });
 
-          let currentBranchId = task.current_branch_id || (await this.store.pivotBranch(taskId));
+          // Optimization: Reuse branch if exists, else pivot
+          const currentBranchId = task.current_branch_id || (await this.store.pivotBranch(taskId));
 
           // Save User Prompt to History ONCE at the start
           const existingMsgs = await this.store.getActiveMessages(taskId, currentBranchId);
@@ -132,12 +132,14 @@ export class Kernel {
             progressSink: resolvedProgressSink,
             progressHeartbeatMs: context.progressHeartbeatMs,
             // Components
-            decision, perception, 
+            decision, perception,
             // Runtime State
             state: "PERCEIVING",
             stepCount: 0,
             turnHint: null,
             isWorkspaceReady: false,
+            forceSimpleChat,
+            promptEmbedding,
             // Data
             task,
             currentBranchId,
@@ -169,7 +171,7 @@ export class Kernel {
           // --- FSM Loop ---
           while (context.state !== "DONE" && context.state !== "FAILED") {
             telemetry.debug(`[FSM] State: ${context.state}`);
-            
+
             switch (context.state) {
               case "PERCEIVING":
                 context = await this._handlePerceiving(context);
@@ -236,10 +238,10 @@ export class Kernel {
   // --- FSM Handlers ---
 
   async _handlePerceiving(context) {
-    const { perception, originalPrompt, task, retrievedContext, sessionId, taskId, isReroute, stepCount } = context;
-    
+    const { perception, originalPrompt, task, retrievedContext, sessionId, taskId, isReroute, stepCount, forceSimpleChat } = context;
+
     // Construct prompt with retry hint if needed
-    const promptToUse = isReroute 
+    const promptToUse = isReroute
       ? originalPrompt + " (RETRY: Ensure all relevant tools are included)"
       : originalPrompt;
 
@@ -247,23 +249,52 @@ export class Kernel {
       telemetry.info("[Kernel] Rerouting skills based on runtime signal.");
     }
 
-    const heuristicSimpleChat = this._isLikelyChitchat(promptToUse);
-    let isSimpleChat = heuristicSimpleChat;
-    if (stepCount <= 0) {
-      isSimpleChat = await this._classifySimpleChatWithRouter(promptToUse, heuristicSimpleChat);
+    // 1. FAST PATH: Forwarded Identity or Continuous Detection
+    let isSimpleChat = false;
+    let skipRouter = false;
+
+    if (forceSimpleChat !== undefined) {
+      isSimpleChat = forceSimpleChat;
+      skipRouter = true;
+      telemetry.info("[Kernel] Intent inherited from caller", { isSimpleChat });
     }
 
-    if (isSimpleChat !== heuristicSimpleChat) {
-      telemetry.info("[Kernel] Intent router override for simple-chat classification", {
-        heuristic: heuristicSimpleChat,
-        routed: isSimpleChat
-      });
+    if (!skipRouter) {
+      const isContinuation = this._detectContinuation(promptToUse);
+      if (isContinuation) {
+        // If we are already in a task flow, treat continuation as task
+        const inTaskFlow = await this._isSessionInTaskFlow(taskId, context.currentBranchId);
+        if (inTaskFlow) {
+          isSimpleChat = false;
+          skipRouter = true;
+          telemetry.info("[Kernel] Continuation detected in active task flow, bypassing router.");
+        }
+      }
+    }
+
+    // 2. SCORING HEURISTIC
+    if (!skipRouter) {
+      const scoring = this._scoreIntent(promptToUse, context);
+      if (scoring.confidence === "high") {
+        isSimpleChat = scoring.intent === "chitchat";
+        skipRouter = true;
+        telemetry.info("[Kernel] High-confidence heuristic trigger", { intent: scoring.intent, score: scoring.score });
+      }
+    }
+
+    // 3. LLM ROUTER (Fallback)
+    if (!skipRouter && stepCount <= 0) {
+      isSimpleChat = await this._classifySimpleChatWithRouter(promptToUse, this._isLikelyChitchat(promptToUse));
+    } else if (!skipRouter) {
+      // For middle steps, we usually don't reroute unless explicitly requested or forced
+      isSimpleChat = false;
     }
 
     const sensoryData = await perception.gather({
       prompt: promptToUse, task, retrievedContext, sessionId, taskId,
       routerTimeoutMs: this._resolveRouterTimeoutMs(),
       isSimpleChat,
+      promptEmbedding: context.promptEmbedding,
       requestChatCompletion: this._chat.bind(this),
       extractText: (json) => json.content || "",
       store: this.store // Pass store to allow lesson retrieval
@@ -278,7 +309,7 @@ export class Kernel {
     context.contextBlock = perception.formatToContext(sensoryData);
     context.state = "THINKING";
     context.isReroute = false; // Reset flag
-    
+
     return context;
   }
 
@@ -286,7 +317,7 @@ export class Kernel {
     context.stepCount++;
     const { taskId, currentBranchId, maxHistory, sensoryData, stepCount, turnHint, originalPrompt, agentName, contextBlock } = context;
     this._emitProgress(context, EVENT_TYPES.STEP_STARTED, { step: stepCount });
-    
+
     const stepSpan = telemetry.startSpan(`Step.${stepCount}`);
     const startTime = Date.now();
     context.stepStartedAt = startTime;
@@ -294,38 +325,38 @@ export class Kernel {
     // Time-Slicing Context Filter
     // 1. Fetch raw messages (limit is slightly larger than maxHistory to allow filtering)
     const rawMessages = await this.store.getActiveMessages(taskId, currentBranchId, maxHistory + 5);
-    
+
     // 2. Filter by session timeout
     const SESSION_TIMEOUT = 60 * 60 * 1000; // 1 Hour
     const filteredMessages = [];
-    
+
     if (rawMessages.length > 0) {
       // Logic: Iterate backwards. Keep adding messages until we find a gap > TIMEOUT.
       for (let i = rawMessages.length - 1; i >= 0; i--) {
         const currentMsg = rawMessages[i];
-        
+
         // If this is not the last message, check gap with the NEXT one (chronologically later)
         if (i < rawMessages.length - 1) {
           const nextMsg = rawMessages[i + 1];
           const gap = nextMsg.createdAt - currentMsg.createdAt;
-          
+
           if (gap > SESSION_TIMEOUT) {
-            telemetry.info("[Kernel] Context time-slice detected. Dropping older history.", { 
-              droppedCount: i + 1, 
+            telemetry.info("[Kernel] Context time-slice detected. Dropping older history.", {
+              droppedCount: i + 1,
               breakAt: new Date(currentMsg.createdAt).toISOString(),
               gapMs: gap
             });
             break; // Stop collecting, we hit the session boundary
           }
         }
-        
+
         filteredMessages.unshift(currentMsg);
       }
     }
-    
+
     // 3. Enforce max count limit
     const finalMessages = filteredMessages.slice(-maxHistory);
-    
+
     const history = this._toHistory(finalMessages);
     const baseSystem = this._buildSystemPrompt();
     const system = `${baseSystem}\n\n${contextBlock}`;
@@ -349,7 +380,7 @@ export class Kernel {
     } else {
       telemetry.debug(`[Kernel] FINAL PROMPT (From History): ${originalPrompt}`);
     }
-    
+
     // LLM Call
     const llmSpan = telemetry.startSpan("LLM.chat");
     const llmResponse = await this._chat({ agentName, model: currentModel }, requestMessages, {
@@ -383,7 +414,7 @@ export class Kernel {
 
   async _handleDeciding(context) {
     const { decision, turnResult, stepCount, sensoryData, stepSpan } = context;
-    
+
     const heuristicSimpleChat = (sensoryData.skills.length === 0 || this._isLikelyChitchat(context.originalPrompt)) && stepCount <= 1;
     const isSimpleChat = stepCount <= 1
       ? Boolean(context.isSimpleChatIntent ?? heuristicSimpleChat)
@@ -427,11 +458,11 @@ export class Kernel {
     await this.store.saveTaskMessage({
       taskId: context.taskId, branchId: context.currentBranchId, executionId, senderId: "agent",
       content: turnResult.content,
-      payload: { 
-        thinking: turnResult.thinking, 
-        loopStatus: turnResult.loopStatus, 
-        loopProtocol: turnResult.loopProtocol, 
-        tool_calls: turnResult.tool_calls 
+      payload: {
+        thinking: turnResult.thinking,
+        loopStatus: turnResult.loopStatus,
+        loopProtocol: turnResult.loopProtocol,
+        tool_calls: turnResult.tool_calls
       }
     });
 
@@ -445,7 +476,7 @@ export class Kernel {
       stepSpan.end({ status: advice.status });
       this._recordStepSla(context, advice.status);
       context.finalResult = { status: advice.status, turnResult, message: advice.message };
-      
+
       // Auto-Reflection Trigger
       // Reflect on both failure and multi-step success to capture positive/negative lessons
       const isNonTrivial = context.stepCount >= 3;
@@ -465,6 +496,81 @@ export class Kernel {
     }
 
     return context;
+  }
+
+  _scoreIntent(prompt, context) {
+    const raw = String(prompt || "").trim();
+    if (!raw) return { intent: "chitchat", confidence: "high", score: -100 };
+
+    let score = 0;
+
+    // 1. Structural Signals (Technical nature)
+    if (raw.includes("```") || raw.includes("    ")) score += 30; // Code blocks
+    if (/\.(js|ts|py|go|sh|json|md|sql|ya?ml|dockerfile|lock|csv|db|sqlite)/i.test(raw)) score += 20; // Extensions
+    if (/[\\\/][a-z0-9_\-\.]+[\\\/]/i.test(raw)) score += 15; // Paths
+
+    // 2. Dynamic Task Signals (Derived from Skills)
+    if (context?.perception) {
+      const taskSignals = context.perception.getTaskSignals();
+      const lowerRaw = raw.toLowerCase();
+      let matchCount = 0;
+      for (const signal of taskSignals) {
+        if (lowerRaw.includes(signal)) matchCount++;
+      }
+      score += Math.min(40, matchCount * 10); // cap contribution
+    }
+
+    // 3. Length Signals
+    if (raw.length > 120) score += 25;
+    if (raw.length > 300) score += 40;
+
+    // 4. Social/Identity Signals (Negative Score for Task)
+    const greetings = /^(hi|hello|hey|yo|ping|test|你好|在吗|在么|哈喽|早上好|下午好|晚上好|晚安|收到|ok|了解|确认|好|好的|没问题|没事)$/i;
+    if (greetings.test(raw)) score -= 40;
+
+    // Check name from SOUL if available
+    if (context?.perception) {
+      const soul = context.perception._getSoul();
+      const nameMatch = soul.match(/name:\s*([^\n]+)/i);
+      if (nameMatch) {
+        const name = nameMatch[1].trim().toLowerCase();
+        if (raw.toLowerCase().includes(name)) score -= 15;
+      }
+    }
+
+    if (raw.length < 4) score -= 20;
+    if ((raw.match(/[\u{1F300}-\u{1F9FF}]/gu) || []).length > 2) score -= 15; // Emojis
+
+    // Thresholds
+    if (score >= 45) return { intent: "task", confidence: "high", score };
+    if (score <= -30) return { intent: "chitchat", confidence: "high", score };
+
+    return { intent: score > 0 ? "task" : "chitchat", confidence: "low", score };
+  }
+
+  _detectContinuation(prompt) {
+    const raw = String(prompt || "").trim().toLowerCase();
+    const patterns = ["继续", "接着", "go on", "continue", "then", "and then", "more", "next"];
+    return patterns.some(p => raw === p || raw.startsWith(p + " ") || raw.endsWith(" " + p));
+  }
+
+  async _isSessionInTaskFlow(taskId, branchId) {
+    try {
+      const messages = await this.store.getActiveMessages(taskId, branchId, 3);
+      if (!messages || messages.length === 0) return false;
+
+      // Check if last bot message had tool calls or came from a technical executor
+      const lastBotMsg = [...messages].reverse().find(m => m.senderId === "agent");
+      if (!lastBotMsg) return false;
+
+      const payload = lastBotMsg.payload || {};
+      if (payload.tool_calls && payload.tool_calls.length > 0) return true;
+      if (payload.loopStatus === "RUNNING") return true;
+
+      return false;
+    } catch (e) {
+      return false;
+    }
   }
 
   _isLikelyChitchat(prompt) {
@@ -783,7 +889,7 @@ Output JSON only:
 
   async _handleActing(context) {
     const { turnResult, taskId, currentBranchId, onStep, stepSpan, advice } = context;
-    
+
     // Check Sandbox
     if (process.env.AGENT_ENABLE_SANDBOX === "true" && !context.isWorkspaceReady) {
       await this.action.setupWorkspace(taskId);
@@ -797,7 +903,16 @@ Output JSON only:
     const _trackTool = (tc, actionResult) => {
       try {
         const name = tc.function?.name || tc.name;
-        if (name && !context.toolsUsed.includes(name)) context.toolsUsed.push(name);
+        const argsStr = JSON.stringify(tc.function?.arguments || tc.arguments || {});
+        const lastCall = context.toolsUsed[context.toolsUsed.length - 1];
+
+        // Only deduplicate if it's the EXACT same tool and EXACT same arguments (likely an accidental loop or retry)
+        const isDuplicate = lastCall && lastCall.name === name && lastCall.args === argsStr;
+
+        if (name && !isDuplicate) {
+          context.toolsUsed.push({ name, args: argsStr });
+        }
+
         if (!actionResult.ok) context.toolFailures++;
       } catch (e) {
         telemetry.warn("[Kernel] _trackTool failed", { error: e.message });
@@ -881,14 +996,14 @@ Output JSON only:
 
   async _handleReflecting(context) {
     const { taskId, currentBranchId, maxHistory, originalPrompt, finalResult } = context;
-    
+
     telemetry.info("[Kernel] Entering Reflection Phase");
     const span = telemetry.startSpan("Kernel.reflect");
-    
+
     // 1. Fetch recent history to provide context for reflection
     const messages = await this.store.getActiveMessages(taskId, currentBranchId, 20); // More context for reflection
     const history = this._toHistory(messages);
-    
+
     // 2. Build Reflection Prompt (supports both success and failure)
     const isSuccess = finalResult.status === "DONE";
     const reflectionPrompt = `
@@ -901,8 +1016,8 @@ Criteria for a valid lesson:
 2. If the issue was a simple network error or temporary glitch, IGNORE it.
 3. If the task was routine with no noteworthy pattern, IGNORE it.
 ${isSuccess
-  ? `4. For successful tasks, capture effective patterns worth replicating (e.g., "Reading config before editing avoids errors", "Using tool X for Y is more efficient").`
-  : `4. For failed tasks, identify the root cause and what should be done differently.`}
+        ? `4. For successful tasks, capture effective patterns worth replicating (e.g., "Reading config before editing avoids errors", "Using tool X for Y is more efficient").`
+        : `4. For failed tasks, identify the root cause and what should be done differently.`}
 
 Output Format:
 If you find a lesson, return a JSON object with:
@@ -923,20 +1038,20 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
     try {
       // Use fast model for reflection if available
       const model = process.env.AGENT_CHAT_MODEL || null;
-      
+
       const response = await this._chat({ agentName: "Reflector", model }, requestMessages, {
         jsonSchema: {
-            type: "object",
-            properties: {
-                root_cause: { type: "string" },
-                what_not_to_do: { type: "string" },
-                suggested_alternatives: { type: "string" },
-                ignore: { type: "boolean" }
-            }
+          type: "object",
+          properties: {
+            root_cause: { type: "string" },
+            what_not_to_do: { type: "string" },
+            suggested_alternatives: { type: "string" },
+            ignore: { type: "boolean" }
+          }
         },
         jsonSchemaName: "reflection_output"
       });
-      
+
       const content = response.content || response.choices?.[0]?.message?.content || "{}";
       let lesson = {};
       try {
@@ -947,7 +1062,12 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
 
       if (lesson && !lesson.ignore && (lesson.what_not_to_do || lesson.suggested_alternatives)) {
         telemetry.info("[Kernel] Lesson identified", lesson);
-        
+
+        // Trajectory Capture
+        if (isSuccess) {
+          lesson.trajectory = context.toolsUsed;
+        }
+
         // Inject Interaction Protocol into final result
         if (!context.finalResult.protocol) context.finalResult.protocol = {};
         const desc = isSuccess
@@ -969,7 +1089,7 @@ If NO lesson is worth recording, return exactly: {"ignore": true}
     } catch (err) {
       telemetry.error("[Kernel] Reflection failed", err);
     }
-    
+
     span.end();
     context.state = "DONE"; // Terminal state
     return context;
