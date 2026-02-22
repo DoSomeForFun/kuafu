@@ -289,8 +289,8 @@ export class Store {
     const minLen = 3;
     if (contentLen < minLen) return;
 
-    const now = Math.floor(Date.now() / 1000);
-    const timestamp = String((createdAt && createdAt > 0) ? createdAt : now);
+    // 统一使用毫秒存储
+    const timestamp = createdAt && createdAt > 0 ? String(createdAt) : String(Date.now());
 
     this.db.prepare("DELETE FROM context_vectors WHERE message_id = ?").run(messageId);
     this.db.prepare(`
@@ -308,7 +308,7 @@ export class Store {
       filterByTaskIdPrefix,
       timeDecayDays = 30,
       minContentLength = 3,
-      botWeight = 1.0
+      senderWeightMap = {}  // 新增：{ "sender_id": weight } 映射表，由调用方传入，解耦 IM 系统
     } = input;
     if (!embedding) return [];
 
@@ -355,19 +355,33 @@ export class Store {
         // 1. 内容长度过滤（预处理阶段，不算分）
         const contentLen = (r.content?.length || 0);
 
-        // 2. 发送者降权：Bot 消息降权
-        const isBotMessage = String(r.sender_id || "").toLowerCase().startsWith("bot");
-        if (isBotMessage && botWeight < 1.0) {
-          finalScore *= botWeight;
+        // 2. 发送者降权：使用 senderWeightMap，由调用方配置，解耦 IM 系统
+        const senderId = String(r.sender_id || "");
+        if (senderWeightMap && typeof senderWeightMap === "object") {
+          // 精确匹配
+          let weight = senderWeightMap[senderId];
+          // 前缀匹配（如 "bot_" 开头的）
+          if (weight === undefined) {
+            for (const [key, val] of Object.entries(senderWeightMap)) {
+              if (senderId.toLowerCase().startsWith(key.toLowerCase())) {
+                weight = val;
+                break;
+              }
+            }
+          }
+          // 默认权重为 1.0（不降权）
+          if (weight !== undefined && weight < 1.0) {
+            finalScore *= weight;
+          }
         }
 
-        // 3. 时间衰减（如果有 created_at 字段）
-        // created_at 存储为 TEXT，读取后需转为数字
+        // 3. 时间衰减（统一使用毫秒）
+        // created_at 存储为 TEXT（毫秒）
         const createdAtStr = r.created_at;
         if (timeDecayDays > 0 && createdAtStr) {
-          const createdAtNum = Number(createdAtStr);
-          if (createdAtNum && createdAtNum > 0) {
-            const ageDays = (now - createdAtNum * 1000) / (1000 * 60 * 60 * 24);
+          const createdAtMs = Number(createdAtStr);
+          if (createdAtMs && createdAtMs > 0) {
+            const ageDays = (now - createdAtMs) / (1000 * 60 * 60 * 24);
             const timeWeight = Math.exp(-ageDays / timeDecayDays);
             finalScore *= (0.3 + 0.7 * timeWeight); // 最低 30% 权重
           }
