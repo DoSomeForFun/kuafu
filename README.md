@@ -195,6 +195,20 @@ if (isTransientError(errorType)) {
 }
 ```
 
+### Error Types
+
+| Error Type | HTTP Status | Retryable | Description |
+|------------|-------------|-----------|-------------|
+| `transient_timeout` | 504 | ✅ | Request timed out |
+| `transient_network` | - | ✅ | Network connection failed |
+| `transient_rate_limit` | 429 | ✅ | Rate limit exceeded |
+| `transient_service_unavailable` | 502, 503 | ✅ | Service temporarily unavailable |
+| `permanent_not_found` | 404 | ❌ | Resource not found |
+| `permanent_auth` | 401 | ❌ | Authentication failed |
+| `permanent_forbidden` | 403 | ❌ | Access forbidden |
+| `permanent_invalid_input` | 400 | ❌ | Invalid input provided |
+| `system` | 500 | ❌ | System error (unexpected) |
+
 ## Store - Sender Weight Map
 
 The `searchRelevant()` method supports `senderWeightMap` to adjust message relevance scores based on sender identity:
@@ -203,19 +217,25 @@ The `searchRelevant()` method supports `senderWeightMap` to adjust message relev
 const results = await store.searchRelevant({
   embedding,
   senderWeightMap: {
-    "bot_kuafu": 0.3,  // exact match
-    "bot_": 0.5,       // prefix match (bot_*)
-    "system_": 0.2,    // prefix match (system_*)
-    "user_vip": 1.0    // no degradation
+    "bot_kuafu": 0.3,  // exact match: only matches "bot_kuafu"
+    "bot_": 0.5,       // prefix match: matches "bot_kuafu", "bot_assistant", etc.
+    "system_": 0.2,    // prefix match
+    "user_vip": 1.0    // exact match, no degradation
   },
   timeDecayDays: 30    // time-based decay
 });
 ```
 
-Features:
-- Exact match takes priority over prefix match
-- Case-insensitive matching
-- Time decay uses milliseconds internally
+### Matching Rules
+
+1. **Exact match takes priority** - If sender_id exactly matches a key, that weight is used
+2. **Prefix match** - If no exact match, iterate all keys and check `senderId.startsWith(key)` (case-insensitive)
+3. **Default weight is 1.0** - No degradation if no match found
+4. **Only apply if weight < 1.0** - Weights >= 1.0 are ignored
+
+Examples:
+- `senderWeightMap: {"bot_": 0.5}` → "bot_kuafu" gets 0.5, "user_1" gets 1.0
+- `senderWeightMap: {"bot_kuafu": 0.3, "bot_": 0.5}` → "bot_kuafu" gets 0.3 (exact match wins)
 
 ## Testing
 
