@@ -1,0 +1,66 @@
+. "$(dirname "$0")/_/husky.sh"
+
+echo "🔍 Running pre-commit checks..."
+
+# Check JS/ESM syntax
+echo "  [1/6] Checking JS syntax..."
+FAILED=0
+for file in $(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(js|ts|mjs|cjs)$'); do
+  if [ -f "$file" ]; then
+    if ! node --check "$file" 2>/dev/null; then
+      echo "  ❌ Syntax error in $file"
+      FAILED=1
+    fi
+  fi
+done
+if [ $FAILED -eq 1 ]; then
+  echo "  Aborting commit due to syntax errors"
+  exit 1
+fi
+
+# Check ESLint
+echo "  [2/6] Checking ESLint..."
+JS_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(js|mjs)$' | grep -v node_modules | head -20)
+if [ -n "$JS_FILES" ]; then
+  if ! npx eslint $JS_FILES --max-warnings 0 2>/dev/null; then
+    echo "  ❌ ESLint errors found"
+    exit 1
+  fi
+fi
+
+# Check TypeScript types
+echo "  [3/6] Checking TypeScript..."
+TS_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.ts$' | grep -v node_modules | head -20)
+if [ -n "$TS_FILES" ]; then
+  if ! npx tsc --noEmit $TS_FILES 2>/dev/null; then
+    echo "  ❌ TypeScript errors found"
+    exit 1
+  fi
+fi
+
+# Check package.json version
+echo "  [4/6] Checking package.json..."
+if git diff --cached --name-only --diff-filter=ACM | grep -q "package.json"; then
+  if grep -q '"version": "0.0.0"' package.json; then
+    echo "  ❌ package.json version not updated"
+    exit 1
+  fi
+fi
+
+# Check dependencies (package.json/package-lock.json sync)
+echo "  [5/6] Checking dependencies..."
+if git diff --cached --name-only --diff-filter=ACM | grep -q "package.json"; then
+  if [ -f "package-lock.json" ]; then
+    if ! npm ls --depth=0 > /dev/null 2>&1; then
+      echo "  ⚠️  Dependency issues detected (run npm install)"
+    fi
+  fi
+fi
+
+# Check Docker/Dockerfile changes
+echo "  [6/6] Checking Dockerfile..."
+if git diff --cached --name-only --diff-filter=ACM | grep -q "Dockerfile"; then
+  echo "  🔨 Dockerfile changed - skipping build validation in kuafu"
+fi
+
+echo "✅ All checks passed"
