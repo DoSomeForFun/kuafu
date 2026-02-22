@@ -3,6 +3,11 @@ import { telemetry } from "./telemetry.js";
 import { getRoutingModelConfig } from "./routing-config.js";
 import fs from "node:fs";
 import path from "node:path";
+import net from "node:net";
+
+const SOUL_CACHE = { data: null, ts: 0 };
+const SKILL_DOCS_CACHE = new Map(); // path -> { content: string, ts: number }
+const CACHE_TTL = 30000; // 30 seconds
 
 /**
  * Perception Layer
@@ -40,78 +45,86 @@ export class Perception {
   }
 
   _getSoul() {
-    if (this._soul === null) {
-      try {
-        this._soul = fs.existsSync("SOUL.md") ? fs.readFileSync("SOUL.md", "utf-8") : "";
-      } catch (e) {
-        this._soul = "";
-      }
+    const now = Date.now();
+    if (SOUL_CACHE.data !== null && (now - SOUL_CACHE.ts < CACHE_TTL)) {
+      return SOUL_CACHE.data;
     }
-    return this._soul;
+
+    try {
+      const soul = fs.existsSync("SOUL.md") ? fs.readFileSync("SOUL.md", "utf-8") : "";
+      SOUL_CACHE.data = soul;
+      SOUL_CACHE.ts = now;
+      return soul;
+    } catch (e) {
+      return "";
+    }
   }
 
   /**
    * 核心感知方法
    */
   async gather(input) {
-    const { prompt, task, retrievedContext, sessionId, taskId, isSimpleChat } = input;
-
-    if (isSimpleChat) {
-      const state = this.observe(sessionId, taskId, task);
-      state.isSimpleChat = true;
-      return {
-        skills: [],
-        state,
-        workspace: null,
-        lessons: [],
-        retrievedContext: []
-      };
-    }
-
-    // 2. 语义技能路由 (Semantic Routing)
-    // 优先使用语义路由，如果配置了 Router Model；否则降级到关键词路由
-    let skills = [];
+    const span = telemetry.startSpan("Perception.gather");
     try {
-      skills = await this.routeSkillsSemantic(prompt, input.requestChatCompletion, input.routerTimeoutMs);
-    } catch (e) {
-      telemetry.warn("[Perception] Semantic routing failed, falling back to keywords.", { error: e?.message || String(e) });
-      skills = this.routeSkills(prompt);
-    }
+      const { prompt, task, retrievedContext, sessionId, taskId, isSimpleChat } = input;
 
-    // 3. 环境观测 (New: Workspace Snapshot)
-    const state = this.observe(sessionId, taskId, task);
-    const workspace = this.observeWorkspace();
+      // Predictive Warmup Signal (Fire and forget)
+      this._predictiveWarmup(prompt);
 
-    // 4. 教训检索 (New: Lesson Injection)
-    let lessons = [];
-    try {
-      // 4.1 Task-Specific Lessons (Strong Match)
-      // We need access to Store here. But Perception doesn't have direct access to Store instance usually.
-      // However, Kernel creates Perception. We could pass store to gather?
-      // Or we can import getVectorStore()._rawStore (Store instance) if we use the singleton pattern from vector-store.js?
-      // The `task` object passed here comes from store.getTaskById(), so we might need to query store.
-      
-      // Let's assume input.store is available or we use the singleton getVectorStore()._rawStore as a fallback?
-      // The cleanest way is to pass store in input.
-      // Let's check Kernel.js call site. It passes { prompt, task, retrievedContext, sessionId, taskId, requestChatCompletion }.
-      // We should update Kernel to pass `store`.
-      
-      // For now, let's try to access store if passed, or skip.
-      const store = input.store; 
-      if (store) {
-        lessons = await store.getLessons(taskId);
+      if (isSimpleChat) {
+        const state = this.observe(sessionId, taskId, task);
+        state.isSimpleChat = true;
+        return {
+          skills: [],
+          state,
+          workspace: null,
+          lessons: [],
+          retrievedContext: []
+        };
       }
-    } catch (e) {
-      telemetry.warn("[Perception] Failed to load lessons", { error: e.message });
-    }
 
-    return {
-      skills,
-      state,
-      workspace,
-      lessons, // Return lessons
-      retrievedContext: prompt.length > 20 ? retrievedContext : []
-    };
+      // 2. 语义技能路由 (Semantic Routing)
+      // 优先使用语义路由，如果配置了 Router Model；否则降级到关键词路由
+      let skills = [];
+      try {
+        skills = await this.routeSkillsSemantic(prompt, input.requestChatCompletion, input.routerTimeoutMs);
+      } catch (e) {
+        telemetry.warn("[Perception] Semantic routing failed, falling back to keywords.", { error: e?.message || String(e) });
+        skills = this.routeSkills(prompt);
+      }
+
+      const state = this.observe(sessionId, taskId, task);
+      const workspace = this.observeWorkspace();
+
+      // 4. 教训与经验检索 (Lesson & Experience Injection)
+      let lessons = [];
+      let globalExperiences = [];
+      try {
+        const store = input.store;
+        if (store) {
+          // 4.1 Task-Specific Lessons
+          lessons = await store.getLessons(taskId);
+
+          // 4.2 Global Experiences (Deep Retrieval)
+          if (input.promptEmbedding) {
+            globalExperiences = await store.searchGlobalLessons(input.promptEmbedding, 3);
+          }
+        }
+      } catch (e) {
+        telemetry.warn("[Perception] Failed to load experiences", { error: e.message });
+      }
+
+      return {
+        skills,
+        state,
+        workspace,
+        lessons,
+        globalExperiences,
+        retrievedContext: prompt.length > 20 ? retrievedContext : []
+      };
+    } finally {
+      span.end();
+    }
   }
 
   /**
@@ -127,6 +140,23 @@ export class Perception {
       const keywords = skill.name.split(/[-_]+/).filter(k => k.length > 1);
       return keywords.some(k => normalizedPrompt.includes(k));
     });
+  }
+
+  _predictiveWarmup(prompt) {
+    try {
+      const SOCKET_PATH = "/tmp/kuafu-executor.sock";
+      const text = String(prompt || "").toLowerCase();
+      let executor = "codex_cli"; // default
+      if (text.includes("#qwen") || text.includes("/qwen") || text.includes("qwen")) executor = "qwen_cli";
+      else if (text.includes("#iflow") || text.includes("/iflow") || text.includes("iflow")) executor = "iflow_cli";
+
+      const socket = net.createConnection(SOCKET_PATH);
+      socket.on("error", () => { }); // siliently fail if daemon not running
+      socket.write(JSON.stringify({ type: "warmup", executor }) + "\n");
+      socket.end();
+    } catch (e) {
+      // ignore
+    }
   }
 
   /**
@@ -231,6 +261,27 @@ Rules:
   }
 
   /**
+   * 提取动态任务信号关键词 (提取所有可用技能的名字和前几个关键词作为信号)
+   */
+  getTaskSignals() {
+    const skills = this._getSkills();
+    const signals = new Set(["npm", "git", "docker", "run", "http", "sql", "db", "log", "error", "bug"]);
+
+    for (const s of skills) {
+      if (s.name) {
+        // 将技能名拆解（如 sqlite-db-query -> sqlite, db, query）
+        s.name.split(/[-_]+/).forEach(k => { if (k.length >= 3) signals.add(k.toLowerCase()); });
+      }
+      if (s.description) {
+        // 从描述中提取前几个英文单词或数字作为信号
+        const words = s.description.toLowerCase().match(/[a-z0-9]{3,}/g) || [];
+        words.slice(0, 15).forEach(w => signals.add(w));
+      }
+    }
+    return Array.from(signals);
+  }
+
+  /**
    * 格式化 Context：动态拼装锦囊妙计
    */
   formatToContext(data) {
@@ -248,13 +299,19 @@ Rules:
 
     // 1. 动态技能锦囊 (New: Dynamic Skill Instructions & Examples)
     if (skills && skills.length > 0) {
+      const now = Date.now();
       const skillDocs = skills.map(s => {
-        // 尝试从 SKILL.md 中提取具体的锦囊
         const skillPath = s.path;
+
+        // Cache Check
+        const cached = SKILL_DOCS_CACHE.get(skillPath);
+        if (cached && (now - cached.ts < CACHE_TTL)) {
+          return cached.content;
+        }
+
         let extra = "";
         try {
           if (fs.existsSync(skillPath)) {
-            // New: Use lazy loading helper
             const content = loadSkillBody(skillPath);
             const instMatch = content.match(/### Instructions([\s\S]*?)(?=###|$)/i);
             const exMatch = content.match(/### Examples([\s\S]*?)(?=###|$)/i);
@@ -262,7 +319,10 @@ Rules:
             if (exMatch) extra += `\n**实战范例**:${exMatch[1].trim()}`;
           }
         } catch (e) { }
-        return `### 技能: ${s.name}\n${s.description}${extra}`;
+
+        const formatted = `### 技能: ${s.name}\n${s.description}${extra}`;
+        SKILL_DOCS_CACHE.set(skillPath, { content: formatted, ts: now });
+        return formatted;
       }).join("\n\n---\n\n");
 
       sections.push(`[DYNAMIC_SKILLS_MANUAL]\n${skillDocs}`);
@@ -282,7 +342,7 @@ Rules:
     // 4. 教训注入 (New: Lessons Learned)
     const { lessons } = data;
     if (lessons && lessons.length > 0) {
-      const lessonText = lessons.map(l => 
+      const lessonText = lessons.map(l =>
         `- ❌ 避免 (Avoid): ${l.what_not_to_do}\n  ✅ 建议 (Prefer): ${l.suggested_alternatives}\n  💡 原因 (Reason): ${l.root_cause}`
       ).join("\n\n");
       sections.push(`[LESSONS_LEARNED]\n${lessonText}`);
@@ -292,6 +352,39 @@ Rules:
     if (retrievedContext && retrievedContext.length > 0) {
       const ragBlock = this._formatRetrievedContext(retrievedContext);
       if (ragBlock) sections.push(ragBlock);
+    }
+
+    // 6. 全局经验与确定性轨迹 (Global Experience & Anchors)
+    const { globalExperiences } = data;
+    if (globalExperiences && globalExperiences.length > 0) {
+      const experienceText = globalExperiences.map(exp => {
+        let block = `### 过去经验: ${exp.prompt}\n- 💡 洞察: ${exp.root_cause}\n- ✅ 推荐: ${exp.suggested_alternatives}`;
+        if (exp.trajectory) {
+          try {
+            const traj = JSON.parse(exp.trajectory);
+            if (Array.isArray(traj) && traj.length > 0) {
+              const formattedTraj = traj.map(step => {
+                if (typeof step === 'string') return step;
+                if (step && typeof step === 'object' && step.name) {
+                  // If bash, try to extract command name for brevity
+                  if (step.name === 'bash' && step.args) {
+                    try {
+                      const args = JSON.parse(step.args);
+                      const cmd = String(args.command || "").trim().split(/\s+/)[0];
+                      return cmd ? `bash(${cmd})` : 'bash';
+                    } catch (e) { return 'bash'; }
+                  }
+                  return step.name;
+                }
+                return String(step);
+              }).join(" -> ");
+              block += `\n- 🚀 成功路径 (Trajectory): ${formattedTraj}`;
+            }
+          } catch (e) { }
+        }
+        return block;
+      }).join("\n\n");
+      sections.push(`[GLOBAL_EXPERIENCE_RECALL]\n${experienceText}`);
     }
 
     return sections.join("\n\n---\n\n");

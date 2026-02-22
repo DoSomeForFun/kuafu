@@ -2,6 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+let skillDiscoveryCache = null;
+let lastDiscoveryTime = 0;
+const DISCOVERY_CACHE_TTL = 60000; // 60 seconds
+const activeWatchers = new Set();
+
 const DEFAULT_MAX_SCAN = 200;
 const DEFAULT_SNIPPET_CHARS = 1200;
 const BUILTIN_SKILLS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "default-skills");
@@ -139,7 +144,7 @@ function inferDescription(snippet) {
 function parseFrontmatter(content) {
   const yamlMatch = content.match(/^---\n([\s\S]*?)\n---/);
   if (!yamlMatch) return {};
-  
+
   const metadata = {};
   const lines = yamlMatch[1].split("\n");
   for (const line of lines) {
@@ -158,12 +163,12 @@ function buildCatalog(skillEntries, maxChars) {
       const isBuiltin = typeof entry === "object" ? Boolean(entry?.isBuiltin) : false;
       if (!filePath) return null;
       // Only read the first 2000 chars for metadata parsing
-      const snippet = readSkillSnippet(filePath, 2000); 
+      const snippet = readSkillSnippet(filePath, 2000);
       if (!snippet) return null;
-      
+
       const dirName = path.basename(path.dirname(filePath));
       const frontmatter = parseFrontmatter(snippet);
-      
+
       const name = frontmatter.name || dirName;
       const description = frontmatter.description || inferDescription(snippet);
       const entryFile = String(frontmatter.entry || "run.sh").trim();
@@ -201,17 +206,45 @@ export function loadSkillBody(skillPath) {
  * 列出所有已发现的技能（仅元数据）
  */
 export function listDiscoveredSkills(options = {}) {
+  const now = Date.now();
+  if (skillDiscoveryCache && (now - lastDiscoveryTime < DISCOVERY_CACHE_TTL) && !options.noCache) {
+    return skillDiscoveryCache;
+  }
+
   const configuredSkillDirs = resolveConfiguredSkillDirs(options);
+
+  // Setup Hot Reload / Watchers
+  if (activeWatchers.size === 0) {
+    const skillRoots = listSkillRoots(configuredSkillDirs);
+    for (const root of skillRoots) {
+      try {
+        if (!fs.existsSync(root)) continue;
+        const watcher = fs.watch(root, { recursive: true }, (eventType, filename) => {
+          if (filename && filename.toLowerCase().endsWith("skill.md")) {
+            skillDiscoveryCache = null;
+          }
+        });
+        activeWatchers.add(watcher);
+      } catch (err) {
+        // Silent fail for watch (e.g. too many files)
+      }
+    }
+  }
+
   const maxScan = Math.max(
     20,
     Number(options.maxScan || process.env.AGENT_MAX_SKILL_SCAN || process.env.TELEGRAM_MAX_SKILL_SCAN) || DEFAULT_MAX_SCAN
   );
   // We don't need maxSnippetChars for listing anymore, we just need enough to read frontmatter
-  
+
   const skillRoots = listSkillRoots(configuredSkillDirs);
   if (!skillRoots.length) return [];
   const skillFiles = collectSkillFiles(skillRoots, maxScan);
-  return buildCatalog(skillFiles, 2000).sort((a, b) => a.name.localeCompare(b.name));
+  const result = buildCatalog(skillFiles, 2000).sort((a, b) => a.name.localeCompare(b.name));
+
+  skillDiscoveryCache = result;
+  lastDiscoveryTime = now;
+  return result;
 }
 
 export function formatSkillContext(skills = []) {
