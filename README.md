@@ -178,3 +178,54 @@ Host adapter is responsible for:
 3. Output delivery UX
 4. Platform-specific permission/webhook/rate-limit handling
 
+## Error Classification
+
+Kuafu provides a unified error classification system in `errors.js`:
+
+```js
+import { classifyError, ErrorType, isTransientError } from "kuafu/errors.js";
+
+// Classify HTTP errors
+const errorType = classifyError(new Error("Too Many Requests"), { status: 429 });
+// => "transient_rate_limit"
+
+// Check if error is retryable
+if (isTransientError(errorType)) {
+  // retry logic
+}
+```
+
+## Store - Sender Weight Map
+
+The `searchRelevant()` method supports `senderWeightMap` to adjust message relevance scores based on sender identity:
+
+```js
+const results = await store.searchRelevant({
+  embedding,
+  senderWeightMap: {
+    "bot_kuafu": 0.3,  // exact match
+    "bot_": 0.5,       // prefix match (bot_*)
+    "system_": 0.2,    // prefix match (system_*)
+    "user_vip": 1.0    // no degradation
+  },
+  timeDecayDays: 30    // time-based decay
+});
+```
+
+Features:
+- Exact match takes priority over prefix match
+- Case-insensitive matching
+- Time decay uses milliseconds internally
+
+## Testing
+
+Run tests with:
+
+```bash
+npm test
+```
+
+Test coverage:
+- `__tests__/errors.test.js` - Error classification
+- `__tests__/store-sender-weight.test.js` - Sender weight and time decay
+
