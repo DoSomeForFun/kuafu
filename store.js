@@ -6,6 +6,30 @@ import fs from "node:fs";
 import { telemetry } from "./telemetry.js";
 
 /**
+ * Sensitive content patterns for filtering
+ */
+const SENSITIVE_PATTERNS = [
+  /sk-[a-zA-Z0-9]{20,}/i,  // OpenAI API key
+  /ghp_[a-zA-Z0-9]{36}/,   // GitHub personal access token
+  /gho_[a-zA-Z0-9]{36}/,   // GitHub OAuth token
+  /ghu_[a-zA-Z0-9]{36}/,   // GitHub user-to-server token
+  /ghs_[a-zA-Z0-9]{36}/,   // GitHub server-to-server token
+  /ghr_[a-zA-Z0-9]{36}/,   // GitHub refresh token
+  /password\s*[:=]\s*\S+/i,  // password field
+  /secret\s*[:=]\s*\S+/i,    // secret field
+  /api[_-]?key\s*[:=]\s*\S+/i,  // API key field
+  /bearer\s+[a-zA-Z0-9\-_\.]{20,}/i,  // Bearer token
+];
+
+/**
+ * Check if content contains sensitive information
+ */
+function containsSensitiveContent(content) {
+  if (!content) return false;
+  return SENSITIVE_PATTERNS.some(pattern => pattern.test(content));
+}
+
+/**
  * Unified Store (SQLite + Vector)
  */
 export class Store {
@@ -142,7 +166,7 @@ export class Store {
       taskId: row.task_id,
       branchId: row.branch_id,
       executionId: row.execution_id,
-      senderId: row.sender_id, // 关键：映射为驼峰
+      senderId: row.sender_id,
       content: row.content,
       isArchived: row.is_archived === 1,
       createdAt: row.created_at,
@@ -253,18 +277,24 @@ export class Store {
   async upsertVector(input) {
     const { messageId, taskId, senderId, content, embedding, createdAt } = input;
     if (!embedding) return;
-    
+
+    // 敏感内容过滤 - 保护用户隐私和安全
+    if (containsSensitiveContent(content)) {
+      telemetry.info("[Store] upsertVector skipped due to sensitive content", { messageId, taskId });
+      return;
+    }
+
     // 过滤极短内容（噪音过滤）
     const contentLen = (content?.length || 0);
     const minLen = 3;
     if (contentLen < minLen) return;
-    
+
     const now = Math.floor(Date.now() / 1000);
     const timestamp = String((createdAt && createdAt > 0) ? createdAt : now);
-    
+
     this.db.prepare("DELETE FROM context_vectors WHERE message_id = ?").run(messageId);
     this.db.prepare(`
-      INSERT INTO context_vectors(message_id, task_id, sender_id, content, embedding, created_at) 
+      INSERT INTO context_vectors(message_id, task_id, sender_id, content, embedding, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(messageId, taskId, senderId, content, JSON.stringify(embedding), timestamp);
   }
@@ -278,13 +308,13 @@ export class Store {
       filterByTaskIdPrefix,
       timeDecayDays = 30,
       minContentLength = 3,
-      senderWeightMap = {}  // 新增：{ "sender_id": weight } 映射表，由调用方传入
+      botWeight = 1.0
     } = input;
     if (!embedding) return [];
-    
+
     // 多取一些结果，用于过滤和重排
     const fetchLimit = Math.max(limit * 3, 20);
-    
+
     let sql = `
       SELECT message_id, task_id, sender_id, content, distance
       FROM context_vectors
@@ -308,32 +338,29 @@ export class Store {
     // 后处理：前缀过滤 + 内容过滤 + 发送者降权 + 时间衰减
     const prefix = filterByTaskIdPrefix;
     const now = Date.now();
-    const cutoffTime = timeDecayDays > 0 
-      ? Math.floor(now / 1000) - timeDecayDays * 24 * 60 * 60 
+    const cutoffTime = timeDecayDays > 0
+      ? Math.floor(now / 1000) - timeDecayDays * 24 * 60 * 60
       : 0;
 
     const processed = rows
       .map(r => {
         const baseScore = 1 / (1 + r.distance);
         let finalScore = baseScore;
-        
+
         // 0. 前缀过滤（vec0 不支持 LIKE，后处理过滤）
         if (prefix && !String(r.task_id || "").startsWith(prefix)) {
           return null; // 标记为过滤
         }
-        
+
         // 1. 内容长度过滤（预处理阶段，不算分）
         const contentLen = (r.content?.length || 0);
-        
-        // 2. 发送者降权：根据 senderWeightMap 映射表计算权重
-        // 由调用方传入，如 { "bot_kuafu": 0.3, "assistant": 0.5 }
-        const senderId = String(r.sender_id || "");
-        const senderWeight = senderWeightMap[senderId] ?? 1.0;  // 默认不降权
-        
-        if (senderWeight < 1.0) {
-          finalScore *= senderWeight;
+
+        // 2. 发送者降权：Bot 消息降权
+        const isBotMessage = String(r.sender_id || "").toLowerCase().startsWith("bot");
+        if (isBotMessage && botWeight < 1.0) {
+          finalScore *= botWeight;
         }
-        
+
         // 3. 时间衰减（如果有 created_at 字段）
         // created_at 存储为 TEXT，读取后需转为数字
         const createdAtStr = r.created_at;
@@ -345,14 +372,14 @@ export class Store {
             finalScore *= (0.3 + 0.7 * timeWeight); // 最低 30% 权重
           }
         }
-        
+
         return {
           id: r.message_id,
           taskId: r.task_id,
           senderId: r.sender_id,
           content: r.content,
           contentLength: contentLen,
-          senderWeight,
+          isBotMessage,
           createdAt: createdAtStr,
           baseScore,
           finalScore
