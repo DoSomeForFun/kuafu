@@ -99,11 +99,33 @@ export class Store {
     }
 
     try {
+      // 检查现有表的字段
+      let contextVecHasCreatedAt = false;
+      try {
+        const vecInfo = this.db.prepare("PRAGMA table_info(context_vectors)").all();
+        contextVecHasCreatedAt = vecInfo.some(col => col.name === "created_at");
+      } catch (e) { /* 表不存在，会自动创建 */ }
+
+      if (contextVecHasCreatedAt) {
+        // 表已有所需字段，静默跳过
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS context_vectors USING vec0(
+            message_id TEXT, task_id TEXT, sender_id TEXT, content TEXT, 
+            embedding FLOAT[384], created_at TEXT
+          );
+        `);
+      } else {
+        // 尝试重建表（如果存在旧数据会丢失，这里简化处理）
+        this.db.exec("DROP TABLE IF EXISTS context_vectors");
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS context_vectors USING vec0(
+            message_id TEXT, task_id TEXT, sender_id TEXT, content TEXT, 
+            embedding FLOAT[384], created_at TEXT
+          );
+        `);
+      }
+
       this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS context_vectors USING vec0(
-          message_id TEXT, task_id TEXT, sender_id TEXT, content TEXT, 
-          embedding FLOAT[384]
-        );
         CREATE VIRTUAL TABLE IF NOT EXISTS lesson_vectors USING vec0(
           lesson_id TEXT, prompt TEXT, 
           embedding FLOAT[384]
@@ -229,11 +251,22 @@ export class Store {
   }
 
   async upsertVector(input) {
-    const { messageId, taskId, senderId, content, embedding } = input;
+    const { messageId, taskId, senderId, content, embedding, createdAt } = input;
     if (!embedding) return;
+    
+    // 过滤极短内容（噪音过滤）
+    const contentLen = (content?.length || 0);
+    const minLen = 3;
+    if (contentLen < minLen) return;
+    
+    const now = Math.floor(Date.now() / 1000);
+    const timestamp = String((createdAt && createdAt > 0) ? createdAt : now);
+    
     this.db.prepare("DELETE FROM context_vectors WHERE message_id = ?").run(messageId);
-    this.db.prepare("INSERT INTO context_vectors(message_id, task_id, sender_id, content, embedding) VALUES (?, ?, ?, ?, ?)")
-      .run(messageId, taskId, senderId, content, JSON.stringify(embedding));
+    this.db.prepare(`
+      INSERT INTO context_vectors(message_id, task_id, sender_id, content, embedding, created_at) 
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(messageId, taskId, senderId, content, JSON.stringify(embedding), timestamp);
   }
 
   async searchRelevant(input) {
@@ -242,15 +275,22 @@ export class Store {
       limit = 5,
       filterByTaskId,
       filterByTaskIds,
-      filterByTaskIdPrefix
+      filterByTaskIdPrefix,
+      timeDecayDays = 30,
+      minContentLength = 3,
+      botWeight = 1.0
     } = input;
     if (!embedding) return [];
+    
+    // 多取一些结果，用于过滤和重排
+    const fetchLimit = Math.max(limit * 3, 20);
+    
     let sql = `
       SELECT message_id, task_id, sender_id, content, distance
       FROM context_vectors
       WHERE embedding MATCH ? AND k = ?
     `;
-    const params = [JSON.stringify(embedding), limit];
+    const params = [JSON.stringify(embedding), fetchLimit];
     if (filterByTaskId) {
       sql += " AND task_id = ?";
       params.push(filterByTaskId);
@@ -260,17 +300,74 @@ export class Store {
       sql += ` AND task_id IN (${placeholders})`;
       params.push(...filterByTaskIds);
     }
-    if (filterByTaskIdPrefix) {
-      sql += " AND task_id LIKE ?";
-      params.push(`${String(filterByTaskIdPrefix)}%`);
-    }
+    // 注意：vec0 KNN 查询不支持 LIKE，所以 filterByTaskIdPrefix 改为后处理过滤
     sql += " ORDER BY distance ASC";
 
     const rows = this.db.prepare(sql).all(...params);
 
-    return rows
-      .slice(0, limit)
-      .map(r => ({ id: r.message_id, taskId: r.task_id, senderId: r.sender_id, content: r.content, score: 1 / (1 + r.distance) }));
+    // 后处理：前缀过滤 + 内容过滤 + 发送者降权 + 时间衰减
+    const prefix = filterByTaskIdPrefix;
+    const now = Date.now();
+    const cutoffTime = timeDecayDays > 0 
+      ? Math.floor(now / 1000) - timeDecayDays * 24 * 60 * 60 
+      : 0;
+
+    const processed = rows
+      .map(r => {
+        const baseScore = 1 / (1 + r.distance);
+        let finalScore = baseScore;
+        
+        // 0. 前缀过滤（vec0 不支持 LIKE，后处理过滤）
+        if (prefix && !String(r.task_id || "").startsWith(prefix)) {
+          return null; // 标记为过滤
+        }
+        
+        // 1. 内容长度过滤（预处理阶段，不算分）
+        const contentLen = (r.content?.length || 0);
+        
+        // 2. 发送者降权：Bot 消息降权
+        const isBotMessage = String(r.sender_id || "").toLowerCase().startsWith("bot");
+        if (isBotMessage && botWeight < 1.0) {
+          finalScore *= botWeight;
+        }
+        
+        // 3. 时间衰减（如果有 created_at 字段）
+        // created_at 存储为 TEXT，读取后需转为数字
+        const createdAtStr = r.created_at;
+        if (timeDecayDays > 0 && createdAtStr) {
+          const createdAtNum = Number(createdAtStr);
+          if (createdAtNum && createdAtNum > 0) {
+            const ageDays = (now - createdAtNum * 1000) / (1000 * 60 * 60 * 24);
+            const timeWeight = Math.exp(-ageDays / timeDecayDays);
+            finalScore *= (0.3 + 0.7 * timeWeight); // 最低 30% 权重
+          }
+        }
+        
+        return {
+          id: r.message_id,
+          taskId: r.task_id,
+          senderId: r.sender_id,
+          content: r.content,
+          contentLength: contentLen,
+          isBotMessage,
+          createdAt: createdAtStr,
+          baseScore,
+          finalScore
+        };
+      })
+      // 过滤：null（被前缀过滤排除的）+ 短内容
+      .filter(r => r !== null && r.contentLength >= minContentLength)
+      // 按最终分数排序
+      .sort((a, b) => b.finalScore - a.finalScore)
+      .slice(0, limit);
+
+    return processed.map(r => ({
+      id: r.id,
+      taskId: r.taskId,
+      senderId: r.senderId,
+      content: r.content,
+      score: r.finalScore
+    }));
   }
 
   _mapRun(row) {
