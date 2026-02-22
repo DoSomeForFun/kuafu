@@ -3,6 +3,7 @@ import path from "node:path";
 import { exec as execCb } from "node:child_process";
 import { promisify } from "node:util";
 import { listDiscoveredSkills, loadSkillBody } from "./skill-loader.js";
+import { isRetryableBashError } from "./errors.js";
 
 const execAsync = promisify(execCb);
 
@@ -286,8 +287,7 @@ export class Action {
   }
 
   _isRetryableBashError(errorText) {
-    const RETRYABLE_PATTERN = /timeout|timed out|etimedout|econnreset|econnrefused|econnaborted|enotfound|eai_again|enetunreach|ehostunreach|epipe|429|502|503|504|socket hang up|network|temporar(?:y|ily)|resource busy|text file busy|permission denied|operation not permitted|eacces|eperm/i;
-    return RETRYABLE_PATTERN.test(String(errorText || ""));
+    return isRetryableBashError(errorText);
   }
 
   _retryDelayMs(attempt) {

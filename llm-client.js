@@ -3,6 +3,7 @@
  * Supports HTTP (OpenAI-compatible) backend
  */
 import { telemetry } from "./telemetry.js";
+import { ErrorType, classifyError, getErrorDescription, createClassifiedError } from "./errors.js";
 
 /**
  * @typedef {Object} LLMMessage
@@ -93,7 +94,9 @@ export class HttpLLMClient extends LLMClient {
    */
   async chatCompletion(messages, options = {}) {
     if (!this.endpoint) {
-      throw new Error("LLM endpoint is missing. Please check your .env configuration (KUAFU_ROUTER_BASE_URL or OPENAI_COMPAT_BASE_URL).");
+      const errorType = classifyError(new Error("LLM endpoint is missing"));
+      const description = getErrorDescription(errorType);
+      throw new Error(`${description}. Please check your .env configuration (KUAFU_ROUTER_BASE_URL or OPENAI_COMPAT_BASE_URL).`);
     }
 
     const allowTools = options.allowTools !== false;
@@ -154,7 +157,9 @@ export class HttpLLMClient extends LLMClient {
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`HTTP request failed (${response.status}): ${text}`);
+      const errorType = classifyError(new Error(text), { status: response.status });
+      const description = getErrorDescription(errorType);
+      throw new Error(`${description} (${response.status}): ${text}`);
     }
 
     const json = await response.json();

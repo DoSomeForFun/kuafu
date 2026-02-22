@@ -6,6 +6,7 @@ import { createLLMClient } from "./llm-client.js";
 import { telemetry, runWithTrace } from "./telemetry.js";
 import { createProgressEvent, EVENT_TYPES, getProgressHeartbeatMs, normalizeProgressSink, validateProgressEvent } from "./progress-events.js";
 import { getRoutingModelConfig } from "./routing-config.js";
+import { ErrorType, classifyError, getErrorDescription, isTransientError } from "./errors.js";
 
 /**
  * The Unified Kernel (HuluWa 2.0 - Pragmatic & Robust)
@@ -728,13 +729,29 @@ export class Kernel {
   }
 
   _classifyIntentRouterFailureReason(errorText) {
+    // Use unified error classification
+    const errorType = classifyError(new Error(errorText));
+    
+    // Map internal error types to router-specific reasons
+    const typeToReason = {
+      [ErrorType.TRANSIENT_TIMEOUT]: "timeout",
+      [ErrorType.TRANSIENT_NETWORK]: "network",
+      [ErrorType.TRANSIENT_RATE_LIMIT]: "rate_limit",
+      [ErrorType.TRANSIENT_SERVICE_UNAVAILABLE]: "network",
+      [ErrorType.PERMANENT_INVALID_INPUT]: "schema_compat",
+      [ErrorType.SYSTEM]: "system_error"
+    };
+    
+    // Check for JSON/schema specific errors first
     const text = String(errorText || "").toLowerCase();
-    if (!text) return "unknown";
-    if (text.includes("intent-router-timeout") || text.includes("timeout") || text.includes("timed out")) return "timeout";
-    if (text.includes("response_format") || text.includes("json_schema") || text.includes("schema")) return "schema_compat";
-    if (/econn|enotfound|eai_again|network|socket|503|502|504|429/.test(text)) return "network";
-    if (text.includes("parse") || text.includes("json")) return "response_parse";
-    return "unknown";
+    if (text.includes("response_format") || text.includes("json_schema") || text.includes("schema")) {
+      return "schema_compat";
+    }
+    if (text.includes("parse") || text.includes("json")) {
+      return "response_parse";
+    }
+    
+    return typeToReason[errorType] || "unknown";
   }
 
   _logIntentRouterFallback(reason, extra = {}) {
