@@ -278,7 +278,7 @@ export class Store {
       filterByTaskIdPrefix,
       timeDecayDays = 30,
       minContentLength = 3,
-      botWeight = 1.0
+      senderWeightMap = {}  // 新增：{ "sender_id": weight } 映射表，由调用方传入
     } = input;
     if (!embedding) return [];
     
@@ -325,10 +325,13 @@ export class Store {
         // 1. 内容长度过滤（预处理阶段，不算分）
         const contentLen = (r.content?.length || 0);
         
-        // 2. 发送者降权：Bot 消息降权
-        const isBotMessage = String(r.sender_id || "").toLowerCase().startsWith("bot");
-        if (isBotMessage && botWeight < 1.0) {
-          finalScore *= botWeight;
+        // 2. 发送者降权：根据 senderWeightMap 映射表计算权重
+        // 由调用方传入，如 { "bot_kuafu": 0.3, "assistant": 0.5 }
+        const senderId = String(r.sender_id || "");
+        const senderWeight = senderWeightMap[senderId] ?? 1.0;  // 默认不降权
+        
+        if (senderWeight < 1.0) {
+          finalScore *= senderWeight;
         }
         
         // 3. 时间衰减（如果有 created_at 字段）
@@ -349,7 +352,7 @@ export class Store {
           senderId: r.sender_id,
           content: r.content,
           contentLength: contentLen,
-          isBotMessage,
+          senderWeight,
           createdAt: createdAtStr,
           baseScore,
           finalScore
