@@ -1,11 +1,14 @@
 /**
  * @kuafu/framework - Channel-agnostic Agent Runtime Framework
- * 
- * This is a simplified TypeScript migration stub.
- * Full implementation will be migrated from kuafu/ directory.
  */
 
-// Export types
+// Core modules
+import { Store } from './store.js';
+import { telemetry, runWithTrace } from './telemetry.js';
+
+export { Store, telemetry, runWithTrace };
+
+// Types
 export type {
   Task,
   TaskStatus,
@@ -19,14 +22,14 @@ export type {
   ProgressSink
 } from './types.js';
 
-// Placeholder exports - will be fully implemented in subsequent migrations
+// Version
 export const VERSION = '1.2.0-ts';
 
-export function placeholder(): string {
-  return '@kuafu/framework TypeScript migration in progress';
-}
-
-export default {
+const kuafuFramework = {
   VERSION,
-  placeholder
+  Store,
+  telemetry,
+  runWithTrace
 };
+
+export default kuafuFramework;
