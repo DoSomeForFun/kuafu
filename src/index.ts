@@ -5,8 +5,9 @@
 // Core modules
 import { Store } from './store.js';
 import { telemetry, runWithTrace } from './telemetry.js';
+import { Action } from './action.js';
 
-export { Store, telemetry, runWithTrace };
+export { Store, Action, telemetry, runWithTrace };
 
 // Types
 export type {
@@ -28,6 +29,7 @@ export const VERSION = '1.2.0-ts';
 const kuafuFramework = {
   VERSION,
   Store,
+  Action,
   telemetry,
   runWithTrace
 };

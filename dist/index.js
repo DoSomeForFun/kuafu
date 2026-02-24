@@ -309,16 +309,213 @@ async function runWithTrace(traceId, fn) {
   }
 }
 
+// src/action.ts
+import fs2 from "fs";
+import path2 from "path";
+import { exec as execCb } from "child_process";
+import { promisify } from "util";
+var execAsync = promisify(execCb);
+var Action = class {
+  projectRoot;
+  sandboxBase;
+  cwd;
+  sandboxPath;
+  timeoutMs;
+  bashRetryMax;
+  bashRetryBaseDelayMs;
+  bashRetryMaxDelayMs;
+  constructor(options = {}) {
+    this.projectRoot = options.projectRoot || process.cwd();
+    this.sandboxBase = options.sandboxBase || path2.join(this.projectRoot, ".huluwa/sandboxes");
+    this.cwd = options.cwd || this.projectRoot;
+    this.sandboxPath = null;
+    this.timeoutMs = options.timeoutMs ?? (this._getEnvInt("KUAFU_TOOL_TIMEOUT_MS", 12e4) || this._getEnvInt("AGENT_TOOL_TIMEOUT_MS", 12e4));
+    this.bashRetryMax = this._toSafeInt(options.bashRetryMax ?? this._getEnvInt("TELEGRAM_BASH_RETRY_MAX", 1));
+    this.bashRetryBaseDelayMs = this._toSafeInt(options.bashRetryBaseDelayMs ?? this._getEnvInt("TELEGRAM_BASH_RETRY_BASE_DELAY_MS", 800));
+    this.bashRetryMaxDelayMs = this._toSafeInt(options.bashRetryMaxDelayMs ?? this._getEnvInt("TELEGRAM_BASH_RETRY_MAX_DELAY_MS", 4e3));
+  }
+  /**
+   * Convert to safe integer
+   */
+  _toSafeInt(value, defaultValue) {
+    const num = parseInt(value, 10);
+    return Number.isFinite(num) && num > 0 ? num : defaultValue;
+  }
+  /**
+   * Get environment variable as safe integer
+   */
+  _getEnvInt(envVar, defaultValue) {
+    const value = process.env[envVar] || String(defaultValue);
+    return this._toSafeInt(value, defaultValue);
+  }
+  /**
+   * Get tool specifications
+   */
+  getSpecs() {
+    return [
+      {
+        type: "function",
+        function: {
+          name: "bash",
+          description: "Execute shell command in the current working directory.",
+          parameters: {
+            type: "object",
+            properties: {
+              command: { type: "string", description: "The complete shell command to execute." }
+            },
+            required: ["command"],
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "read",
+          description: "Read file content.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Relative file path." }
+            },
+            required: ["path"],
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: "function",
+        function: {
+          name: "write",
+          description: "Create or overwrite file in sandbox.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "File path." },
+              content: { type: "string", description: "File content." }
+            },
+            required: ["path", "content"],
+            additionalProperties: false
+          }
+        }
+      }
+    ];
+  }
+  /**
+   * Execute bash command
+   */
+  async bash(command) {
+    const startTime = Date.now();
+    try {
+      const { stdout, stderr } = await execAsync(command, {
+        cwd: this.cwd,
+        timeout: this.timeoutMs,
+        shell: "/bin/bash"
+      });
+      return {
+        ok: true,
+        stdout,
+        stderr,
+        retryInfo: {
+          retried: 0,
+          attempts: 1,
+          exhausted: false
+        }
+      };
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      const isTimeout = error.code === "ETIMEDOUT" || error.killed;
+      return {
+        ok: false,
+        error: error.message || String(error),
+        stderr: error.stderr,
+        retryInfo: {
+          retried: 0,
+          attempts: 1,
+          exhausted: !isTimeout
+        }
+      };
+    }
+  }
+  /**
+   * Read file content
+   */
+  async read(filePath) {
+    const fullPath = path2.join(this.cwd, filePath);
+    try {
+      if (!fs2.existsSync(fullPath)) {
+        return {
+          ok: false,
+          error: `File not found: ${filePath}`
+        };
+      }
+      const content = fs2.readFileSync(fullPath, "utf-8");
+      return {
+        ok: true,
+        stdout: content
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error.message || String(error)
+      };
+    }
+  }
+  /**
+   * Write file content
+   */
+  async write(filePath, content) {
+    const fullPath = path2.join(this.cwd, filePath);
+    try {
+      const dir = path2.dirname(fullPath);
+      if (!fs2.existsSync(dir)) {
+        fs2.mkdirSync(dir, { recursive: true });
+      }
+      fs2.writeFileSync(fullPath, content, "utf-8");
+      return {
+        ok: true,
+        stdout: `File written: ${filePath}`
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error.message || String(error)
+      };
+    }
+  }
+  /**
+   * Invoke tool by name
+   */
+  async invokeTool(toolCall) {
+    const { name, arguments: args } = toolCall.function;
+    switch (name) {
+      case "bash":
+        return await this.bash(args.command);
+      case "read":
+        return await this.read(args.path);
+      case "write":
+        return await this.write(args.path, args.content);
+      default:
+        return {
+          ok: false,
+          error: `Unknown tool: ${name}`
+        };
+    }
+  }
+};
+
 // src/index.ts
 var VERSION = "1.2.0-ts";
 var kuafuFramework = {
   VERSION,
   Store,
+  Action,
   telemetry,
   runWithTrace
 };
 var index_default = kuafuFramework;
 export {
+  Action,
   Store,
   VERSION,
   index_default as default,
