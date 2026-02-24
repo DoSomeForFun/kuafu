@@ -678,16 +678,16 @@ var Decision = class {
           stopReason: "max_steps_exceeded"
         };
       }
+      if (lastToolCalls && lastToolCalls.length > 0) {
+        return {
+          shouldContinue: true
+        };
+      }
       const lastTurn = history[history.length - 1];
       if (!lastTurn || !lastTurn.content) {
         return {
           shouldContinue: false,
           stopReason: "empty_response"
-        };
-      }
-      if (lastToolCalls && lastToolCalls.length > 0) {
-        return {
-          shouldContinue: true
         };
       }
       const content = lastTurn.content.toLowerCase();
@@ -714,12 +714,30 @@ var Decision = class {
    * Check if content indicates task completion
    */
   isCompletionIndicated(content) {
-    const completionPatterns = [
+    const englishPatterns = [
       /\b(done|finished|completed|complete)\b/i,
-      /\b(任务完成 | 已完成 | 完成)\b/i,
       /\b(success|succeeded)\b/i
     ];
-    return completionPatterns.some((pattern) => pattern.test(content));
+    const chinesePatterns = [
+      /任务完成/i,
+      /已完成/i,
+      /完成工作/i,
+      /完成了/i,
+      /做完/i,
+      /搞定/i,
+      /结束/i
+    ];
+    for (const pattern of englishPatterns) {
+      if (pattern.test(content)) {
+        return true;
+      }
+    }
+    for (const pattern of chinesePatterns) {
+      if (pattern.test(content)) {
+        return true;
+      }
+    }
+    return false;
   }
   /**
    * Detect repetitive loops in history

@@ -49,19 +49,19 @@ export class Decision {
         };
       }
 
-      // 2. Check for empty response
+      // 2. Check for tool calls (priority - if tools need to be executed)
+      if (lastToolCalls && lastToolCalls.length > 0) {
+        return {
+          shouldContinue: true
+        };
+      }
+
+      // 3. Check for empty response
       const lastTurn = history[history.length - 1];
       if (!lastTurn || !lastTurn.content) {
         return {
           shouldContinue: false,
           stopReason: 'empty_response'
-        };
-      }
-
-      // 3. Check for tool calls
-      if (lastToolCalls && lastToolCalls.length > 0) {
-        return {
-          shouldContinue: true
         };
       }
 
@@ -94,13 +94,38 @@ export class Decision {
    * Check if content indicates task completion
    */
   private isCompletionIndicated(content: string): boolean {
-    const completionPatterns = [
+    // English patterns with word boundaries
+    const englishPatterns = [
       /\b(done|finished|completed|complete)\b/i,
-      /\b(任务完成 | 已完成 | 完成)\b/i,
       /\b(success|succeeded)\b/i
     ];
-
-    return completionPatterns.some(pattern => pattern.test(content));
+    
+    // Chinese patterns without word boundaries (\b doesn't work for Chinese)
+    const chinesePatterns = [
+      /任务完成/i,
+      /已完成/i,
+      /完成工作/i,
+      /完成了/i,
+      /做完/i,
+      /搞定/i,
+      /结束/i
+    ];
+    
+    // Check English patterns
+    for (const pattern of englishPatterns) {
+      if (pattern.test(content)) {
+        return true;
+      }
+    }
+    
+    // Check Chinese patterns
+    for (const pattern of chinesePatterns) {
+      if (pattern.test(content)) {
+        return true;
+      }
+    }
+    
+    return false;
   }
 
   /**

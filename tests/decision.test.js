@@ -34,7 +34,9 @@ describe('Decision - TDD', () => {
 
     it('应该在未达到最大步数时继续', () => {
       const decision = new Decision({ maxSteps: 10 });
-      const history = [];
+      const history = [
+        { sender_id: 'agent', content: '有效的响应内容' }
+      ];
       
       const result = decision.shouldContinue(history, 3);
       
