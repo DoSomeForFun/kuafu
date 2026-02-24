@@ -765,6 +765,387 @@ var Decision = class {
   }
 };
 
+// src/kernel/fsm.ts
+var KernelFSM = class {
+  context;
+  constructor(context) {
+    this.context = context;
+  }
+  /**
+   * Run FSM loop until DONE or FAILED
+   */
+  async run(handlers) {
+    const span = telemetry.startSpan("KernelFSM.run");
+    try {
+      while (this.context.state !== "DONE" && this.context.state !== "FAILED") {
+        telemetry.debug(`[FSM] State: ${this.context.state}`);
+        try {
+          switch (this.context.state) {
+            case "PERCEIVING":
+              this.context = await handlers.handlePerceiving(this.context);
+              break;
+            case "THINKING":
+              this.context = await handlers.handleThinking(this.context);
+              break;
+            case "DECIDING":
+              this.context = await handlers.handleDeciding(this.context);
+              break;
+            case "ACTING":
+              this.context = await handlers.handleActing(this.context);
+              break;
+            case "REFLECTING":
+              this.context = await handlers.handleReflecting(this.context);
+              break;
+            default:
+              throw new Error(`Unknown state: ${this.context.state}`);
+          }
+          if (this.context.onStep) {
+            this.context.onStep(this.context);
+          }
+          this.context.stepCount++;
+        } catch (error) {
+          telemetry.error(`[FSM] Error in state ${this.context.state}`, {
+            error: error.message
+          });
+          this.context.state = "FAILED";
+          this.context.finalResult = {
+            error: error.message
+          };
+        }
+      }
+      return this.context;
+    } finally {
+      span.end({
+        finalState: this.context.state,
+        steps: this.context.stepCount
+      });
+    }
+  }
+  /**
+   * Transition to next state
+   */
+  transition(nextState) {
+    telemetry.debug(`[FSM] Transition: ${this.context.state} \u2192 ${nextState}`);
+    this.context.state = nextState;
+  }
+  /**
+   * Get current state
+   */
+  getState() {
+    return this.context.state;
+  }
+  /**
+   * Get current context
+   */
+  getContext() {
+    return this.context;
+  }
+  /**
+   * Update context
+   */
+  updateContext(updates) {
+    this.context = { ...this.context, ...updates };
+  }
+};
+
+// src/kernel/index.ts
+var Kernel = class {
+  store;
+  action;
+  progressSink;
+  constructor(options = {}) {
+    this.store = options.store || options.backend;
+    this.action = options.action || null;
+    this.progressSink = options.progressSink || null;
+  }
+  /**
+   * Run kernel with options
+   */
+  async run(options) {
+    const {
+      taskId,
+      prompt: originalPrompt,
+      sessionId,
+      maxSteps = 30,
+      retrievedContext = [],
+      onStep,
+      maxHistory = 10,
+      progressSink,
+      isSimpleChat: forceSimpleChat,
+      promptEmbedding
+    } = options;
+    const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
+    const resolvedProgressSink = progressSink || this.progressSink;
+    return runWithTrace(traceId, async () => {
+      const span = telemetry.startSpan("Kernel.run");
+      try {
+        const task = await this.store.getTaskById(taskId);
+        if (!task) {
+          throw new Error(`Task not found: ${taskId}`);
+        }
+        const currentBranchId = task.current_branch_id || await this.store.pivotBranch(taskId);
+        await this.saveUserPrompt(taskId, currentBranchId, originalPrompt);
+        const context = {
+          // Config
+          taskId,
+          sessionId,
+          originalPrompt,
+          maxSteps,
+          maxHistory,
+          agentName: options.agentName,
+          onStep,
+          progressSink: resolvedProgressSink,
+          progressHeartbeatMs: 6e3,
+          // Runtime State
+          state: "PERCEIVING",
+          stepCount: 0,
+          turnHint: null,
+          isWorkspaceReady: false,
+          forceSimpleChat,
+          promptEmbedding,
+          // Data
+          task,
+          currentBranchId,
+          retrievedContext,
+          sensoryData: null,
+          contextBlock: "",
+          turnResult: null,
+          advice: null,
+          finalResult: null,
+          // Flags
+          isReroute: false,
+          // Metrics
+          toolsUsed: [],
+          toolFailures: 0,
+          totalPromptTokens: 0,
+          totalCompletionTokens: 0,
+          runStartTime: Date.now()
+        };
+        this.emitProgress(context, "RUN_STARTED", {
+          status: "RUNNING",
+          maxSteps
+        });
+        const fsm = new KernelFSM(context);
+        const result = await fsm.run({
+          handlePerceiving: async (ctx) => await this.handlePerceiving(ctx),
+          handleThinking: async (ctx) => await this.handleThinking(ctx),
+          handleDeciding: async (ctx) => await this.handleDeciding(ctx),
+          handleActing: async (ctx) => await this.handleActing(ctx),
+          handleReflecting: async (ctx) => await this.handleReflecting(ctx)
+        });
+        const durationMs = Date.now() - context.runStartTime;
+        const kernelResult = {
+          success: context.state === "DONE",
+          status: context.state,
+          content: context.finalResult?.content || "",
+          steps: context.stepCount,
+          durationMs,
+          stopReason: context.finalResult?.stopReason,
+          meta: {
+            loop: {
+              stopReason: context.finalResult?.stopReason,
+              durationMs
+            }
+          }
+        };
+        span.end({
+          success: kernelResult.success,
+          durationMs
+        });
+        return kernelResult;
+      } catch (error) {
+        span.end({
+          success: false,
+          error: error.message
+        });
+        return {
+          success: false,
+          status: "FAILED",
+          content: "",
+          error: error.message,
+          stopReason: "error"
+        };
+      }
+    });
+  }
+  /**
+   * Save user prompt to history
+   */
+  async saveUserPrompt(taskId, branchId, prompt) {
+    const existingMsgs = await this.store.getActiveMessages(taskId, branchId);
+    const lastMsg = existingMsgs[existingMsgs.length - 1];
+    if (!lastMsg || lastMsg.senderId !== "user" || lastMsg.content !== prompt) {
+      await this.store.saveTaskMessage({
+        taskId,
+        branchId,
+        senderId: "user",
+        content: prompt,
+        payload: {}
+      });
+    }
+  }
+  /**
+   * Handle PERCEIVING state
+   */
+  async handlePerceiving(context) {
+    const span = telemetry.startSpan("Kernel.handlePerceiving");
+    try {
+      const perceptionData = await context.perception.gather({
+        prompt: context.originalPrompt,
+        task: context.task,
+        retrievedContext: context.retrievedContext,
+        sessionId: context.sessionId,
+        taskId: context.taskId,
+        isSimpleChat: context.forceSimpleChat
+      });
+      context = {
+        ...context,
+        sensoryData: perceptionData,
+        contextBlock: perceptionData.state?.contextBlock || "",
+        state: "THINKING"
+      };
+      span.end();
+      return context;
+    } catch (error) {
+      span.end({ error: error.message });
+      throw error;
+    }
+  }
+  /**
+   * Handle THINKING state
+   */
+  async handleThinking(context) {
+    const span = telemetry.startSpan("Kernel.handleThinking");
+    try {
+      const llmResult = await this.callLLM({
+        prompt: context.originalPrompt,
+        systemPrompt: context.contextBlock
+      });
+      context = {
+        ...context,
+        turnResult: llmResult,
+        totalPromptTokens: context.totalPromptTokens + (llmResult.usage?.promptTokens || 0),
+        totalCompletionTokens: context.totalCompletionTokens + (llmResult.usage?.completionTokens || 0),
+        state: "DECIDING"
+      };
+      span.end();
+      return context;
+    } catch (error) {
+      span.end({ error: error.message });
+      throw error;
+    }
+  }
+  /**
+   * Handle DECIDING state
+   */
+  async handleDeciding(context) {
+    const span = telemetry.startSpan("Kernel.handleDeciding");
+    try {
+      const turnResult = context.turnResult;
+      if (turnResult?.toolCalls && turnResult.toolCalls.length > 0) {
+        context = {
+          ...context,
+          toolsUsed: [...context.toolsUsed, ...turnResult.toolCalls.map((tc) => tc.function?.name)],
+          state: "ACTING"
+        };
+      } else {
+        context = {
+          ...context,
+          finalResult: {
+            content: turnResult?.content || "",
+            stopReason: "task_completed"
+          },
+          state: "DONE"
+        };
+      }
+      span.end();
+      return context;
+    } catch (error) {
+      span.end({ error: error.message });
+      throw error;
+    }
+  }
+  /**
+   * Handle ACTING state
+   */
+  async handleActing(context) {
+    const span = telemetry.startSpan("Kernel.handleActing");
+    try {
+      const turnResult = context.turnResult;
+      if (!turnResult?.toolCalls) {
+        context = {
+          ...context,
+          state: "THINKING"
+        };
+        return context;
+      }
+      const toolResults = [];
+      for (const toolCall of turnResult.toolCalls) {
+        const result = await this.action.invokeTool(toolCall);
+        toolResults.push(result);
+        if (!result.ok) {
+          context.toolFailures++;
+        }
+      }
+      context = {
+        ...context,
+        turnResult: {
+          ...turnResult,
+          toolResults
+        },
+        state: "REFLECTING"
+      };
+      span.end();
+      return context;
+    } catch (error) {
+      span.end({ error: error.message });
+      throw error;
+    }
+  }
+  /**
+   * Handle REFLECTING state
+   */
+  async handleReflecting(context) {
+    const span = telemetry.startSpan("Kernel.handleReflecting");
+    try {
+      context = {
+        ...context,
+        state: "THINKING"
+      };
+      span.end();
+      return context;
+    } catch (error) {
+      span.end({ error: error.message });
+      throw error;
+    }
+  }
+  /**
+   * Call LLM
+   */
+  async callLLM(options) {
+    return {
+      content: "LLM response",
+      usage: {
+        promptTokens: 0,
+        completionTokens: 0
+      }
+    };
+  }
+  /**
+   * Emit progress event
+   */
+  emitProgress(context, type, data) {
+    if (context.progressSink) {
+      context.progressSink.emit({
+        type,
+        taskId: context.taskId,
+        sessionId: context.sessionId,
+        ...data
+      });
+    }
+  }
+};
+
 // src/index.ts
 var VERSION = "1.2.0-ts";
 var kuafuFramework = {
@@ -773,6 +1154,7 @@ var kuafuFramework = {
   Action,
   Perception,
   Decision,
+  Kernel,
   telemetry,
   runWithTrace
 };
@@ -780,6 +1162,7 @@ var index_default = kuafuFramework;
 export {
   Action,
   Decision,
+  Kernel,
   Perception,
   Store,
   VERSION,

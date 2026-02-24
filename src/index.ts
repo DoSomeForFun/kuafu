@@ -8,8 +8,9 @@ import { telemetry, runWithTrace } from './telemetry.js';
 import { Action } from './action.js';
 import { Perception } from './perception.js';
 import { Decision } from './decision.js';
+import { Kernel } from './kernel/index.js';
 
-export { Store, Action, Perception, Decision, telemetry, runWithTrace };
+export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace };
 
 // Types
 export type {
@@ -34,6 +35,7 @@ const kuafuFramework = {
   Action,
   Perception,
   Decision,
+  Kernel,
   telemetry,
   runWithTrace
 };
