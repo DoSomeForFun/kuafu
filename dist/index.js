@@ -1,6 +1,5 @@
 // src/store.ts
 import Database from "better-sqlite3";
-import { load as loadSqliteVec } from "sqlite-vec";
 import path from "path";
 import fs from "fs";
 var Store = class {
@@ -15,11 +14,6 @@ var Store = class {
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
-    try {
-      loadSqliteVec(this.db);
-    } catch (err) {
-      console.warn("[Store] sqlite-vec load failed:", err.message);
-    }
     this._initSchema();
   }
   _initSchema() {
@@ -97,14 +91,6 @@ var Store = class {
         payload TEXT,
         created_at INTEGER
       );
-      CREATE TABLE IF NOT EXISTS context_vectors (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id TEXT,
-        task_id TEXT,
-        sender_id TEXT,
-        content TEXT,
-        embedding BLOB
-      );
     `);
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
@@ -113,7 +99,6 @@ var Store = class {
       CREATE INDEX IF NOT EXISTS idx_llm_executions_task ON llm_executions(task_id);
       CREATE INDEX IF NOT EXISTS idx_runs_chat ON runs(chat_id);
       CREATE INDEX IF NOT EXISTS idx_runs_sender ON runs(sender_id);
-      CREATE INDEX IF NOT EXISTS idx_context_vectors_task ON context_vectors(task_id);
     `);
   }
   /**

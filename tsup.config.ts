@@ -8,5 +8,5 @@ export default defineConfig({
   clean: true,
   minify: false,
   target: 'node20',
-  external: ['better-sqlite3', 'pino', 'sqlite-vec']
+  external: ['better-sqlite3', 'pino']
 });
