@@ -1,6 +1,7 @@
 import { telemetry, runWithTrace } from '../telemetry.js';
 import { KernelFSM } from './fsm.js';
 import type { KernelContext, KernelRunOptions, KernelRunResult, KernelState } from './types.js';
+import type { OutcomeSink } from '../types.js';
 
 /**
  * The Unified Kernel - Agent execution orchestrator
@@ -12,6 +13,7 @@ export class Kernel {
   private store: any;
   private action: any;
   private progressSink: any;
+  private outcomeSink: OutcomeSink | null;
 
   constructor(options: {
     store?: any;
@@ -19,11 +21,13 @@ export class Kernel {
     action?: any;
     workdir?: string;
     progressSink?: any;
+    outcomeSink?: OutcomeSink;
     [key: string]: any;
   } = {}) {
     this.store = options.store || options.backend;
     this.action = options.action || null;
     this.progressSink = options.progressSink || null;
+    this.outcomeSink = options.outcomeSink || null;
   }
 
   /**
@@ -39,9 +43,11 @@ export class Kernel {
       onStep,
       maxHistory = 10,
       progressSink,
+      outcomeSink: perCallOutcomeSink,
       isSimpleChat: forceSimpleChat,
       promptEmbedding
     } = options;
+    const resolvedOutcomeSink = perCallOutcomeSink || this.outcomeSink;
 
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
     const resolvedProgressSink = progressSink || this.progressSink;
@@ -144,20 +150,53 @@ export class Kernel {
           durationMs
         });
 
+        // Notify outcome sink (fire-and-forget, never throws)
+        if (resolvedOutcomeSink) {
+          try {
+            await resolvedOutcomeSink.onOutcome({
+              taskId,
+              sessionId,
+              status: kernelResult.success ? 'completed' : 'failed',
+              content: kernelResult.content,
+              trigger: (options as any).trigger || 'unknown',
+              durationMs,
+              error: kernelResult.error,
+              metadata: (options as any).outcomeMeta
+            });
+          } catch (sinkErr: any) {
+            console.warn('[Kernel] outcomeSink.onOutcome failed:', sinkErr.message);
+          }
+        }
+
         return kernelResult;
       } catch (error: any) {
         span.end({
           success: false,
           error: error.message
         });
-        
-        return {
+
+        const failedResult = {
           success: false,
-          status: 'FAILED',
+          status: 'FAILED' as const,
           content: '',
           error: error.message,
           stopReason: 'error'
         };
+
+        if (resolvedOutcomeSink) {
+          try {
+            await resolvedOutcomeSink.onOutcome({
+              taskId,
+              sessionId,
+              status: 'failed',
+              content: '',
+              trigger: (options as any).trigger || 'unknown',
+              error: error.message
+            });
+          } catch (_) { /* ignore */ }
+        }
+
+        return failedResult;
       }
     });
   }

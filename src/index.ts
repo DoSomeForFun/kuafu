@@ -23,7 +23,9 @@ export type {
   KernelRunOptions,
   KernelRunResult,
   ProgressEvent,
-  ProgressSink
+  ProgressSink,
+  OutcomePayload,
+  OutcomeSink
 } from './types.js';
 
 // Version

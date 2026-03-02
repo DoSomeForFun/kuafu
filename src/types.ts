@@ -83,6 +83,11 @@ export interface KernelRunOptions {
   maxHistory?: number;
   retrievedContext?: any[];
   promptEmbedding?: number[];
+  outcomeSink?: OutcomeSink;
+  /** Hint for OutcomeSink: who triggered this run */
+  trigger?: 'user' | 'autonomous' | 'unknown';
+  /** Extra metadata passed through to OutcomeSink.onOutcome() */
+  outcomeMeta?: Record<string, unknown>;
 }
 
 /**
@@ -135,4 +140,28 @@ export interface ProgressEvent {
  */
 export interface ProgressSink {
   emit(event: ProgressEvent): Promise<void> | void;
+}
+
+/**
+ * Outcome payload — emitted by Kernel when a task completes or fails.
+ * Consumed by any OutcomeSink implementation (bridge, adapters, etc.)
+ */
+export interface OutcomePayload {
+  taskId: string;
+  sessionId: string;
+  status: 'completed' | 'failed';
+  content: string;
+  trigger: 'user' | 'autonomous' | 'unknown';
+  durationMs?: number;
+  error?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Outcome sink — framework-level contract for "task done → notify outside".
+ * Implementations registered at runtime (bridge, IM adapters, memox, etc.)
+ * Kernel calls this once after every run(), success or failure.
+ */
+export interface OutcomeSink {
+  onOutcome(payload: OutcomePayload): void | Promise<void>;
 }
