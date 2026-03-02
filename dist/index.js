@@ -856,10 +856,12 @@ var Kernel = class {
   store;
   action;
   progressSink;
+  outcomeSink;
   constructor(options = {}) {
     this.store = options.store || options.backend;
     this.action = options.action || null;
     this.progressSink = options.progressSink || null;
+    this.outcomeSink = options.outcomeSink || null;
   }
   /**
    * Run kernel with options
@@ -874,9 +876,11 @@ var Kernel = class {
       onStep,
       maxHistory = 10,
       progressSink,
+      outcomeSink: perCallOutcomeSink,
       isSimpleChat: forceSimpleChat,
       promptEmbedding
     } = options;
+    const resolvedOutcomeSink = perCallOutcomeSink || this.outcomeSink;
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
     const resolvedProgressSink = progressSink || this.progressSink;
     return runWithTrace(traceId, async () => {
@@ -955,19 +959,49 @@ var Kernel = class {
           success: kernelResult.success,
           durationMs
         });
+        if (resolvedOutcomeSink) {
+          try {
+            await resolvedOutcomeSink.onOutcome({
+              taskId,
+              sessionId,
+              status: kernelResult.success ? "completed" : "failed",
+              content: kernelResult.content,
+              trigger: options.trigger || "unknown",
+              durationMs,
+              error: kernelResult.error,
+              metadata: options.outcomeMeta
+            });
+          } catch (sinkErr) {
+            console.warn("[Kernel] outcomeSink.onOutcome failed:", sinkErr.message);
+          }
+        }
         return kernelResult;
       } catch (error) {
         span.end({
           success: false,
           error: error.message
         });
-        return {
+        const failedResult = {
           success: false,
           status: "FAILED",
           content: "",
           error: error.message,
           stopReason: "error"
         };
+        if (resolvedOutcomeSink) {
+          try {
+            await resolvedOutcomeSink.onOutcome({
+              taskId,
+              sessionId,
+              status: "failed",
+              content: "",
+              trigger: options.trigger || "unknown",
+              error: error.message
+            });
+          } catch (_) {
+          }
+        }
+        return failedResult;
       }
     });
   }
