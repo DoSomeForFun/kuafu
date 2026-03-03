@@ -1062,7 +1062,9 @@ var Kernel = class {
             id: `kernel-${randomUUID2()}`,
             content: responseContent,
             source: "kernel-output",
-            purpose: "knowledge"
+            purpose: "knowledge",
+            // Pass routing context so bridge-side store() can scope by chat/thread
+            metadata: { taskId, sessionId }
           }).catch((err) => {
             console.warn("[Kernel] memory.store() failed:", err instanceof Error ? err.message : String(err));
           });
