@@ -1156,7 +1156,7 @@ var Kernel = class {
     try {
       let prompt = context.originalPrompt;
       if (context.lastToolEvidence && context.lastToolEvidence.length > 0) {
-        const failureBlock = context.lastToolEvidence.map((e) => `[Tool Failed] ${e.toolName}(${JSON.stringify(e.arguments)})
+        const failureBlock = context.lastToolEvidence.map((e) => `[Tool Failed] ${e.toolName}
 Error: ${e.error}${e.stderr ? `
 Stderr: ${e.stderr}` : ""}`).join("\n");
         prompt = `${prompt}
@@ -1167,7 +1167,8 @@ ${failureBlock}`;
       const systemPrompt = context.contextBlocks && context.contextBlocks.length > 0 ? this.assembleSystemPrompt(context.contextBlocks) : context.contextBlock;
       const llmResult = await this.callLLM({
         prompt,
-        systemPrompt
+        systemPrompt,
+        tools: this.action?.getSpecs?.() ?? []
       });
       context = {
         ...context,
@@ -1237,7 +1238,10 @@ ${failureBlock}`;
           context.toolFailures++;
           continue;
         }
-        const result = await this.action.invokeTool(toolCall);
+        const result = await this.action.invokeTool(toolCall).catch((err) => ({
+          ok: false,
+          error: this.getErrorMessage(err)
+        }));
         toolResults.push(result);
         if (!result.ok) {
           context.toolFailures++;
@@ -1270,7 +1274,6 @@ ${failureBlock}`;
       const toolResults = context.turnResult?.toolResults ?? [];
       const lastToolEvidence = toolResults.map((result, i) => ({ result, toolCall: toolCalls[i] })).filter(({ result }) => !result.ok).map(({ result, toolCall }) => ({
         toolName: toolCall?.function?.name ?? "unknown",
-        arguments: toolCall?.function?.arguments ?? {},
         error: result.error ?? "unknown error",
         stdout: result.stdout,
         stderr: result.stderr
@@ -1303,7 +1306,11 @@ ${block.content}`;
    */
   async callLLM(options) {
     if (this.llmFn) {
-      return this.llmFn(options);
+      try {
+        return await this.llmFn(options);
+      } catch (err) {
+        throw new Error(`LLM call failed: ${this.getErrorMessage(err)}`);
+      }
     }
     void options;
     return {

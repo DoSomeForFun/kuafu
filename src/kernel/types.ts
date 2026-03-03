@@ -1,4 +1,4 @@
-import type { ToolCall, ToolResult } from '../action.js';
+import type { ToolCall, ToolResult, ToolSpec } from '../action.js';
 import type {
   IAction,
   ContextBlock,
@@ -160,6 +160,7 @@ export interface LLMCallOptions {
   prompt: string;
   systemPrompt?: string;
   history?: unknown[];
+  tools?: ToolSpec[];
   model?: string;
   temperature?: number;
   maxTokens?: number;

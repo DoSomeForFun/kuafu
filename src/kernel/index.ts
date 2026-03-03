@@ -291,7 +291,8 @@ export class Kernel {
 
       const llmResult = await this.callLLM({
         prompt,
-        systemPrompt
+        systemPrompt,
+        tools: this.action?.getSpecs?.() ?? []
       });
 
       context = {
