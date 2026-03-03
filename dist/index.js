@@ -1059,7 +1059,7 @@ var Kernel = class {
         if (finalContext.state === "DONE" && this.memory?.store && finalContext.finalResult?.content) {
           const responseContent = finalContext.finalResult.content;
           this.memory.store({
-            id: `kernel-${traceId}`,
+            id: `kernel-${randomUUID2()}`,
             content: responseContent,
             source: "kernel-output",
             purpose: "knowledge"

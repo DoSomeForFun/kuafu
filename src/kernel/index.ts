@@ -168,7 +168,7 @@ export class Kernel {
         if (finalContext.state === 'DONE' && this.memory?.store && finalContext.finalResult?.content) {
           const responseContent = finalContext.finalResult.content;
           this.memory.store({
-            id: `kernel-${traceId}`,
+            id: `kernel-${randomUUID()}`,
             content: responseContent,
             source: 'kernel-output',
             purpose: 'knowledge'
