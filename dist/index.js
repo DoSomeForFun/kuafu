@@ -1030,24 +1030,24 @@ var Kernel = class {
           maxSteps
         });
         const fsm = new KernelFSM(context);
-        await fsm.run({
+        const finalContext = await fsm.run({
           handlePerceiving: async (ctx) => this.handlePerceiving(ctx),
           handleThinking: async (ctx) => this.handleThinking(ctx),
           handleDeciding: async (ctx) => this.handleDeciding(ctx),
           handleActing: async (ctx) => this.handleActing(ctx),
           handleReflecting: async (ctx) => this.handleReflecting(ctx)
         });
-        const durationMs = Date.now() - context.runStartTime;
+        const durationMs = Date.now() - finalContext.runStartTime;
         const kernelResult = {
-          success: context.state === "DONE",
-          status: context.state === "DONE" ? "DONE" : "FAILED",
-          content: context.finalResult?.content || "",
-          steps: context.stepCount,
+          success: finalContext.state === "DONE",
+          status: finalContext.state === "DONE" ? "DONE" : "FAILED",
+          content: finalContext.finalResult?.content || "",
+          steps: finalContext.stepCount,
           durationMs,
-          stopReason: context.finalResult?.stopReason,
+          stopReason: finalContext.finalResult?.stopReason,
           meta: {
             loop: {
-              stopReason: context.finalResult?.stopReason,
+              stopReason: finalContext.finalResult?.stopReason,
               durationMs
             }
           }
