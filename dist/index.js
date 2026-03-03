@@ -1056,6 +1056,17 @@ var Kernel = class {
             }
           }
         };
+        if (finalContext.state === "DONE" && this.memory?.store && finalContext.finalResult?.content) {
+          const responseContent = finalContext.finalResult.content;
+          this.memory.store({
+            id: `kernel-${traceId}`,
+            content: responseContent,
+            source: "kernel-output",
+            purpose: "knowledge"
+          }).catch((err) => {
+            console.warn("[Kernel] memory.store() failed:", err instanceof Error ? err.message : String(err));
+          });
+        }
         span.end({
           success: kernelResult.success,
           durationMs
