@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 import type { Task, Message, TaskStatus } from './types.js';
+import type { IStore, SaveTaskMessageInput } from './interfaces.js';
 
 /**
  * Sensitive content patterns for filtering
@@ -31,7 +32,7 @@ function containsSensitiveContent(content: string | undefined | null): boolean {
 /**
  * Unified Store (SQLite + Vector)
  */
-export class Store {
+export class Store implements IStore {
   public db: Database.Database;
 
   constructor(dbPath: string = 'data/agent-tasks.sqlite') {
@@ -161,7 +162,15 @@ export class Store {
    */
   async getTaskById(taskId: string): Promise<Task | null> {
     const stmt = this.db.prepare('SELECT * FROM tasks WHERE id = ?');
-    const row = stmt.get(taskId) as any;
+    const row = stmt.get(taskId) as {
+      id: string;
+      title: string;
+      date: string;
+      status: string;
+      notes: string | null;
+      current_branch_id: string | null;
+      updated_at: number | null;
+    } | undefined;
     
     if (!row) return null;
     
@@ -170,9 +179,9 @@ export class Store {
       title: row.title,
       date: row.date,
       status: row.status as TaskStatus,
-      notes: row.notes,
-      current_branch_id: row.current_branch_id,
-      updated_at: row.updated_at
+      notes: row.notes ?? undefined,
+      current_branch_id: row.current_branch_id ?? undefined,
+      updated_at: row.updated_at ?? undefined
     };
   }
 
@@ -188,17 +197,21 @@ export class Store {
   }
 
   /**
+   * Create and switch to a new task branch.
+   */
+  async pivotBranch(taskId: string): Promise<string> {
+    const branchId = randomUUID();
+    const stmt = this.db.prepare(`
+      UPDATE tasks SET current_branch_id = ?, updated_at = ? WHERE id = ?
+    `);
+    stmt.run(branchId, Date.now(), taskId);
+    return branchId;
+  }
+
+  /**
    * Save task message
    */
-  async saveTaskMessage(message: {
-    id: string;
-    task_id: string;
-    branch_id: string;
-    sender_id: string;
-    content: string;
-    payload?: any;
-    execution_id?: string;
-  }): Promise<void> {
+  async saveTaskMessage(message: SaveTaskMessageInput): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT INTO messages (id, task_id, branch_id, execution_id, sender_id, content, payload, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -221,7 +234,7 @@ export class Store {
    */
   async getMessagesForTask(taskId: string, branchId?: string): Promise<Message[]> {
     let sql = 'SELECT * FROM messages WHERE task_id = ? AND is_archived = 0';
-    const params: any[] = [taskId];
+    const params: unknown[] = [taskId];
     
     if (branchId) {
       sql += ' AND branch_id = ?';
@@ -231,19 +244,36 @@ export class Store {
     sql += ' ORDER BY created_at ASC';
     
     const stmt = this.db.prepare(sql);
-    const rows = stmt.all(...params) as any[];
+    const rows = stmt.all(...params) as Array<{
+      id: string;
+      task_id: string;
+      branch_id: string;
+      execution_id: string | null;
+      sender_id: string;
+      content: string;
+      payload: string | null;
+      is_archived: number;
+      created_at: number;
+    }>;
     
     return rows.map(row => ({
       id: row.id,
       task_id: row.task_id,
       branch_id: row.branch_id,
-      execution_id: row.execution_id,
+      execution_id: row.execution_id ?? undefined,
       sender_id: row.sender_id,
       content: row.content,
-      payload: row.payload,
+      payload: row.payload ?? undefined,
       is_archived: row.is_archived,
       created_at: row.created_at
     }));
+  }
+
+  /**
+   * Get active messages for task+branch.
+   */
+  async getActiveMessages(taskId: string, branchId: string): Promise<Message[]> {
+    return this.getMessagesForTask(taskId, branchId);
   }
 
   /**

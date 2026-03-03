@@ -1,33 +1,45 @@
+import { randomUUID } from 'node:crypto';
+import { Decision } from '../decision.js';
+import { Perception } from '../perception.js';
 import { telemetry, runWithTrace } from '../telemetry.js';
+import type { IAction, IDecision, IPerception, IProgressSink, IStore } from '../interfaces.js';
 import { KernelFSM } from './fsm.js';
-import type { KernelContext, KernelRunOptions, KernelRunResult, KernelState } from './types.js';
+import type {
+  KernelContext,
+  KernelDependencies,
+  KernelRunOptions,
+  KernelRunResult,
+  LLMCallOptions,
+  LLMCallResult
+} from './types.js';
 import type { OutcomeSink } from '../types.js';
 
 /**
  * The Unified Kernel - Agent execution orchestrator
- * 
+ *
  * FSM States:
  * PERCEIVING → THINKING → DECIDING → ACTING → REFLECTING → (loop or DONE)
  */
 export class Kernel {
-  private store: any;
-  private action: any;
-  private progressSink: any;
+  private store: IStore;
+  private action: IAction | null;
+  private perception: IPerception;
+  private decision: IDecision;
+  private progressSink: IProgressSink | null;
   private outcomeSink: OutcomeSink | null;
 
-  constructor(options: {
-    store?: any;
-    backend?: any;
-    action?: any;
-    workdir?: string;
-    progressSink?: any;
-    outcomeSink?: OutcomeSink;
-    [key: string]: any;
-  } = {}) {
-    this.store = options.store || options.backend;
-    this.action = options.action || null;
-    this.progressSink = options.progressSink || null;
-    this.outcomeSink = options.outcomeSink || null;
+  constructor(options: KernelDependencies = {}) {
+    const store = options.store ?? options.backend;
+    if (!store) {
+      throw new Error('Kernel requires a store/backend implementation.');
+    }
+
+    this.store = store;
+    this.action = options.action ?? null;
+    this.perception = options.perception ?? (new Perception() as IPerception);
+    this.decision = options.decision ?? (new Decision() as IDecision);
+    this.progressSink = options.progressSink ?? null;
+    this.outcomeSink = options.outcomeSink ?? null;
   }
 
   /**
@@ -45,30 +57,27 @@ export class Kernel {
       progressSink,
       outcomeSink: perCallOutcomeSink,
       isSimpleChat: forceSimpleChat,
-      promptEmbedding
+      promptEmbedding,
+      trigger = 'unknown',
+      outcomeMeta
     } = options;
-    const resolvedOutcomeSink = perCallOutcomeSink || this.outcomeSink;
 
+    const resolvedOutcomeSink = perCallOutcomeSink ?? this.outcomeSink;
+    const resolvedProgressSink = progressSink ?? this.progressSink;
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
-    const resolvedProgressSink = progressSink || this.progressSink;
 
     return runWithTrace(traceId, async () => {
       const span = telemetry.startSpan('Kernel.run');
-      
+
       try {
-        // Get task
         const task = await this.store.getTaskById(taskId);
         if (!task) {
           throw new Error(`Task not found: ${taskId}`);
         }
 
-        // Get or create branch
         const currentBranchId = task.current_branch_id || (await this.store.pivotBranch(taskId));
-
-        // Save user prompt to history
         await this.saveUserPrompt(taskId, currentBranchId, originalPrompt);
 
-        // Initialize context
         const context: KernelContext = {
           // Config
           taskId,
@@ -80,15 +89,19 @@ export class Kernel {
           onStep,
           progressSink: resolvedProgressSink,
           progressHeartbeatMs: 6000,
-          
+
+          // Components
+          decision: this.decision,
+          perception: this.perception,
+
           // Runtime State
-          state: 'PERCEIVING' as KernelState,
+          state: 'PERCEIVING',
           stepCount: 0,
           turnHint: null,
           isWorkspaceReady: false,
           forceSimpleChat,
           promptEmbedding,
-          
+
           // Data
           task,
           currentBranchId,
@@ -98,10 +111,10 @@ export class Kernel {
           turnResult: null,
           advice: null,
           finalResult: null,
-          
+
           // Flags
           isReroute: false,
-          
+
           // Metrics
           toolsUsed: [],
           toolFailures: 0,
@@ -110,29 +123,24 @@ export class Kernel {
           runStartTime: Date.now()
         };
 
-        // Emit start event
         this.emitProgress(context, 'RUN_STARTED', {
           status: 'RUNNING',
           maxSteps
         });
 
-        // Create FSM and handlers
         const fsm = new KernelFSM(context);
-        
-        const result = await fsm.run({
-          handlePerceiving: async (ctx) => await this.handlePerceiving(ctx),
-          handleThinking: async (ctx) => await this.handleThinking(ctx),
-          handleDeciding: async (ctx) => await this.handleDeciding(ctx),
-          handleActing: async (ctx) => await this.handleActing(ctx),
-          handleReflecting: async (ctx) => await this.handleReflecting(ctx)
+        await fsm.run({
+          handlePerceiving: async (ctx) => this.handlePerceiving(ctx),
+          handleThinking: async (ctx) => this.handleThinking(ctx),
+          handleDeciding: async (ctx) => this.handleDeciding(ctx),
+          handleActing: async (ctx) => this.handleActing(ctx),
+          handleReflecting: async (ctx) => this.handleReflecting(ctx)
         });
 
         const durationMs = Date.now() - context.runStartTime;
-        
-        // Build result
         const kernelResult: KernelRunResult = {
           success: context.state === 'DONE',
-          status: context.state as 'DONE' | 'FAILED',
+          status: context.state === 'DONE' ? 'DONE' : 'FAILED',
           content: context.finalResult?.content || '',
           steps: context.stepCount,
           durationMs,
@@ -150,7 +158,6 @@ export class Kernel {
           durationMs
         });
 
-        // Notify outcome sink (fire-and-forget, never throws)
         if (resolvedOutcomeSink) {
           try {
             await resolvedOutcomeSink.onOutcome({
@@ -158,28 +165,29 @@ export class Kernel {
               sessionId,
               status: kernelResult.success ? 'completed' : 'failed',
               content: kernelResult.content,
-              trigger: (options as any).trigger || 'unknown',
+              trigger,
               durationMs,
               error: kernelResult.error,
-              metadata: (options as any).outcomeMeta
+              metadata: outcomeMeta
             });
-          } catch (sinkErr: any) {
-            console.warn('[Kernel] outcomeSink.onOutcome failed:', sinkErr.message);
+          } catch (sinkErr: unknown) {
+            console.warn('[Kernel] outcomeSink.onOutcome failed:', this.getErrorMessage(sinkErr));
           }
         }
 
         return kernelResult;
-      } catch (error: any) {
+      } catch (error: unknown) {
+        const errorMessage = this.getErrorMessage(error);
         span.end({
           success: false,
-          error: error.message
+          error: errorMessage
         });
 
-        const failedResult = {
+        const failedResult: KernelRunResult = {
           success: false,
-          status: 'FAILED' as const,
+          status: 'FAILED',
           content: '',
-          error: error.message,
+          error: errorMessage,
           stopReason: 'error'
         };
 
@@ -190,10 +198,12 @@ export class Kernel {
               sessionId,
               status: 'failed',
               content: '',
-              trigger: (options as any).trigger || 'unknown',
-              error: error.message
+              trigger,
+              error: errorMessage
             });
-          } catch (_) { /* ignore */ }
+          } catch {
+            // ignore sink errors on failure path
+          }
         }
 
         return failedResult;
@@ -204,19 +214,16 @@ export class Kernel {
   /**
    * Save user prompt to history
    */
-  private async saveUserPrompt(
-    taskId: string,
-    branchId: string,
-    prompt: string
-  ): Promise<void> {
+  private async saveUserPrompt(taskId: string, branchId: string, prompt: string): Promise<void> {
     const existingMsgs = await this.store.getActiveMessages(taskId, branchId);
     const lastMsg = existingMsgs[existingMsgs.length - 1];
-    
-    if (!lastMsg || lastMsg.senderId !== 'user' || lastMsg.content !== prompt) {
+
+    if (!lastMsg || lastMsg.sender_id !== 'user' || lastMsg.content !== prompt) {
       await this.store.saveTaskMessage({
-        taskId,
-        branchId,
-        senderId: 'user',
+        id: randomUUID(),
+        task_id: taskId,
+        branch_id: branchId,
+        sender_id: 'user',
         content: prompt,
         payload: {}
       });
@@ -228,9 +235,8 @@ export class Kernel {
    */
   private async handlePerceiving(context: KernelContext): Promise<KernelContext> {
     const span = telemetry.startSpan('Kernel.handlePerceiving');
-    
+
     try {
-      // Gather perception data
       const perceptionData = await context.perception.gather({
         prompt: context.originalPrompt,
         task: context.task,
@@ -243,14 +249,14 @@ export class Kernel {
       context = {
         ...context,
         sensoryData: perceptionData,
-        contextBlock: perceptionData.state?.contextBlock || '',
+        contextBlock: perceptionData.state.contextBlock || '',
         state: 'THINKING'
       };
 
       span.end();
       return context;
-    } catch (error: any) {
-      span.end({ error: error.message });
+    } catch (error: unknown) {
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -260,10 +266,8 @@ export class Kernel {
    */
   private async handleThinking(context: KernelContext): Promise<KernelContext> {
     const span = telemetry.startSpan('Kernel.handleThinking');
-    
+
     try {
-      // Build prompt and call LLM
-      // Simplified - full implementation would build system prompt + history
       const llmResult = await this.callLLM({
         prompt: context.originalPrompt,
         systemPrompt: context.contextBlock
@@ -279,8 +283,8 @@ export class Kernel {
 
       span.end();
       return context;
-    } catch (error: any) {
-      span.end({ error: error.message });
+    } catch (error: unknown) {
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -290,19 +294,17 @@ export class Kernel {
    */
   private async handleDeciding(context: KernelContext): Promise<KernelContext> {
     const span = telemetry.startSpan('Kernel.handleDeciding');
-    
+
     try {
       const turnResult = context.turnResult;
-      
-      // Check if LLM returned tool calls
+
       if (turnResult?.toolCalls && turnResult.toolCalls.length > 0) {
         context = {
           ...context,
-          toolsUsed: [...context.toolsUsed, ...turnResult.toolCalls.map((tc: any) => tc.function?.name)],
+          toolsUsed: [...context.toolsUsed, ...turnResult.toolCalls.map((tc) => tc.function.name)],
           state: 'ACTING'
         };
       } else {
-        // No tool calls, task is complete
         context = {
           ...context,
           finalResult: {
@@ -315,8 +317,8 @@ export class Kernel {
 
       span.end();
       return context;
-    } catch (error: any) {
-      span.end({ error: error.message });
+    } catch (error: unknown) {
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -326,10 +328,9 @@ export class Kernel {
    */
   private async handleActing(context: KernelContext): Promise<KernelContext> {
     const span = telemetry.startSpan('Kernel.handleActing');
-    
+
     try {
       const turnResult = context.turnResult;
-      
       if (!turnResult?.toolCalls) {
         context = {
           ...context,
@@ -338,12 +339,20 @@ export class Kernel {
         return context;
       }
 
-      // Execute tools
       const toolResults = [];
       for (const toolCall of turnResult.toolCalls) {
+        if (!this.action) {
+          toolResults.push({
+            ok: false,
+            error: 'Action executor not configured'
+          });
+          context.toolFailures++;
+          continue;
+        }
+
         const result = await this.action.invokeTool(toolCall);
         toolResults.push(result);
-        
+
         if (!result.ok) {
           context.toolFailures++;
         }
@@ -360,8 +369,8 @@ export class Kernel {
 
       span.end();
       return context;
-    } catch (error: any) {
-      span.end({ error: error.message });
+    } catch (error: unknown) {
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -371,9 +380,8 @@ export class Kernel {
    */
   private async handleReflecting(context: KernelContext): Promise<KernelContext> {
     const span = telemetry.startSpan('Kernel.handleReflecting');
-    
+
     try {
-      // Process tool results and prepare for next iteration
       context = {
         ...context,
         state: 'THINKING'
@@ -381,8 +389,8 @@ export class Kernel {
 
       span.end();
       return context;
-    } catch (error: any) {
-      span.end({ error: error.message });
+    } catch (error: unknown) {
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -390,25 +398,22 @@ export class Kernel {
   /**
    * Call LLM
    */
-  private async callLLM(options: {
-    prompt: string;
-    systemPrompt?: string;
-    model?: string;
-  }): Promise<any> {
-    // Simplified - full implementation would call actual LLM
+  private async callLLM(options: LLMCallOptions): Promise<LLMCallResult> {
+    void options;
     return {
       content: 'LLM response',
       usage: {
         promptTokens: 0,
         completionTokens: 0
-      }
+      },
+      latencyMs: 0
     };
   }
 
   /**
    * Emit progress event
    */
-  private emitProgress(context: KernelContext, type: string, data: any): void {
+  private emitProgress(context: KernelContext, type: string, data: Record<string, unknown>): void {
     if (context.progressSink) {
       context.progressSink.emit({
         type,
@@ -417,6 +422,10 @@ export class Kernel {
         ...data
       });
     }
+  }
+
+  private getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }
 

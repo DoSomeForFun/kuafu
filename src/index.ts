@@ -28,6 +28,23 @@ export type {
   OutcomeSink
 } from './types.js';
 
+export type {
+  IStore,
+  IAction,
+  IProgressSink,
+  SaveTaskMessageInput,
+  IPerception,
+  IDecision,
+  IDecisionResult,
+  IDecisionTurn,
+  IPerceptionInput,
+  IPerceptionOutput,
+  IPerceptionState,
+  ProgressEventLike,
+  StoreTaskLike,
+  StoreMessageLike
+} from './interfaces.js';
+
 // Version
 export const VERSION = '1.2.0-ts';
 

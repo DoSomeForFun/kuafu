@@ -1,7 +1,19 @@
+import type { ToolCall, ToolResult } from '../action.js';
+import type {
+  IAction,
+  IDecision,
+  IDecisionResult,
+  IPerception,
+  IPerceptionOutput,
+  IProgressSink,
+  IStore
+} from '../interfaces.js';
+import type { OutcomeSink, Task } from '../types.js';
+
 /**
  * Kernel FSM states
  */
-export type KernelState = 
+export type KernelState =
   | 'PERCEIVING'
   | 'THINKING'
   | 'DECIDING'
@@ -9,6 +21,21 @@ export type KernelState =
   | 'REFLECTING'
   | 'DONE'
   | 'FAILED';
+
+/**
+ * Kernel constructor dependencies
+ */
+export interface KernelDependencies {
+  store?: IStore;
+  backend?: IStore;
+  action?: IAction;
+  perception?: IPerception;
+  decision?: IDecision;
+  workdir?: string;
+  progressSink?: IProgressSink;
+  outcomeSink?: OutcomeSink;
+  [key: string]: unknown;
+}
 
 /**
  * Kernel run options
@@ -21,10 +48,22 @@ export interface KernelRunOptions {
   agentName?: string;
   maxSteps?: number;
   maxHistory?: number;
-  retrievedContext?: any[];
+  retrievedContext?: unknown[];
   promptEmbedding?: number[];
-  progressSink?: any;
-  onStep?: (context: any) => void;
+  progressSink?: IProgressSink;
+  outcomeSink?: OutcomeSink;
+  isSimpleChat?: boolean;
+  onStep?: (context: KernelContext) => void;
+  /** Hint for OutcomeSink: who triggered this run */
+  trigger?: 'user' | 'autonomous' | 'unknown';
+  /** Extra metadata passed through to OutcomeSink.onOutcome() */
+  outcomeMeta?: Record<string, unknown>;
+}
+
+export interface KernelFinalResult {
+  content?: string;
+  stopReason?: string;
+  error?: string;
 }
 
 /**
@@ -38,14 +77,14 @@ export interface KernelContext {
   maxSteps: number;
   maxHistory: number;
   agentName?: string;
-  onStep?: (context: any) => void;
-  progressSink: any;
+  onStep?: (context: KernelContext) => void;
+  progressSink: IProgressSink | null;
   progressHeartbeatMs: number;
-  
+
   // Components
-  decision?: any;
-  perception?: any;
-  
+  decision: IDecision;
+  perception: IPerception;
+
   // Runtime State
   state: KernelState;
   stepCount: number;
@@ -53,22 +92,22 @@ export interface KernelContext {
   isWorkspaceReady: boolean;
   forceSimpleChat?: boolean;
   promptEmbedding?: number[];
-  
+
   // Data
-  task: any;
+  task: Task;
   currentBranchId: string;
-  retrievedContext: any[];
-  sensoryData: any | null;
+  retrievedContext: unknown[];
+  sensoryData: IPerceptionOutput | null;
   contextBlock: string;
-  turnResult: any | null;
-  advice: any | null;
-  finalResult: any | null;
-  
+  turnResult: LLMCallResult | null;
+  advice: IDecisionResult | null;
+  finalResult: KernelFinalResult | null;
+
   // Flags
   isReroute: boolean;
-  
+
   // Metrics
-  journal?: any;
+  journal?: Record<string, unknown>;
   toolsUsed: string[];
   toolFailures: number;
   totalPromptTokens: number;
@@ -108,7 +147,7 @@ export interface KernelRunResult {
 export interface LLMCallOptions {
   prompt: string;
   systemPrompt?: string;
-  history?: any[];
+  history?: unknown[];
   model?: string;
   temperature?: number;
   maxTokens?: number;
@@ -121,12 +160,13 @@ export interface LLMCallOptions {
 export interface LLMCallResult {
   content: string;
   thinking?: string;
-  toolCalls?: any[];
+  toolCalls?: ToolCall[];
+  toolResults?: ToolResult[];
   usage?: {
     promptTokens: number;
     completionTokens: number;
   };
-  latencyMs: number;
+  latencyMs?: number;
 }
 
 /**
@@ -134,7 +174,7 @@ export interface LLMCallResult {
  */
 export interface ToolExecutionResult {
   ok: boolean;
-  results: any[];
+  results: ToolResult[];
   error?: string;
   durationMs: number;
 }

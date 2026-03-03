@@ -1,5 +1,6 @@
 // src/store.ts
 import Database from "better-sqlite3";
+import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
 var Store = class {
@@ -130,9 +131,9 @@ var Store = class {
       title: row.title,
       date: row.date,
       status: row.status,
-      notes: row.notes,
-      current_branch_id: row.current_branch_id,
-      updated_at: row.updated_at
+      notes: row.notes ?? void 0,
+      current_branch_id: row.current_branch_id ?? void 0,
+      updated_at: row.updated_at ?? void 0
     };
   }
   /**
@@ -143,6 +144,17 @@ var Store = class {
       UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?
     `);
     stmt.run(status, Date.now(), taskId);
+  }
+  /**
+   * Create and switch to a new task branch.
+   */
+  async pivotBranch(taskId) {
+    const branchId = randomUUID();
+    const stmt = this.db.prepare(`
+      UPDATE tasks SET current_branch_id = ?, updated_at = ? WHERE id = ?
+    `);
+    stmt.run(branchId, Date.now(), taskId);
+    return branchId;
   }
   /**
    * Save task message
@@ -180,13 +192,19 @@ var Store = class {
       id: row.id,
       task_id: row.task_id,
       branch_id: row.branch_id,
-      execution_id: row.execution_id,
+      execution_id: row.execution_id ?? void 0,
       sender_id: row.sender_id,
       content: row.content,
-      payload: row.payload,
+      payload: row.payload ?? void 0,
       is_archived: row.is_archived,
       created_at: row.created_at
     }));
+  }
+  /**
+   * Get active messages for task+branch.
+   */
+  async getActiveMessages(taskId, branchId) {
+    return this.getMessagesForTask(taskId, branchId);
   }
   /**
    * Save lesson learned
@@ -322,8 +340,8 @@ var Action = class {
   /**
    * Convert to safe integer
    */
-  _toSafeInt(value, defaultValue) {
-    const num = parseInt(value, 10);
+  _toSafeInt(value, defaultValue = 0) {
+    const num = parseInt(String(value), 10);
     return Number.isFinite(num) && num > 0 ? num : defaultValue;
   }
   /**
@@ -408,12 +426,13 @@ var Action = class {
         }
       };
     } catch (error) {
+      const err = error;
       const duration = Date.now() - startTime;
-      const isTimeout = error.code === "ETIMEDOUT" || error.killed;
+      const isTimeout = err.code === "ETIMEDOUT" || err.killed;
       return {
         ok: false,
-        error: error.message || String(error),
-        stderr: error.stderr,
+        error: err.message || String(error),
+        stderr: err.stderr,
         retryInfo: {
           retried: 0,
           attempts: 1,
@@ -440,9 +459,10 @@ var Action = class {
         stdout: content
       };
     } catch (error) {
+      const err = error;
       return {
         ok: false,
-        error: error.message || String(error)
+        error: err.message || String(error)
       };
     }
   }
@@ -462,11 +482,19 @@ var Action = class {
         stdout: `File written: ${filePath}`
       };
     } catch (error) {
+      const err = error;
       return {
         ok: false,
-        error: error.message || String(error)
+        error: err.message || String(error)
       };
     }
+  }
+  /**
+   * Read string arg from tool call payload.
+   */
+  _getStringArg(args, key) {
+    const value = args[key];
+    return typeof value === "string" ? value : null;
   }
   /**
    * Invoke tool by name
@@ -474,12 +502,28 @@ var Action = class {
   async invokeTool(toolCall) {
     const { name, arguments: args } = toolCall.function;
     switch (name) {
-      case "bash":
-        return await this.bash(args.command);
-      case "read":
-        return await this.read(args.path);
-      case "write":
-        return await this.write(args.path, args.content);
+      case "bash": {
+        const command = this._getStringArg(args, "command");
+        if (!command) {
+          return { ok: false, error: "Invalid arguments for bash: command must be a string" };
+        }
+        return await this.bash(command);
+      }
+      case "read": {
+        const filePath = this._getStringArg(args, "path");
+        if (!filePath) {
+          return { ok: false, error: "Invalid arguments for read: path must be a string" };
+        }
+        return await this.read(filePath);
+      }
+      case "write": {
+        const filePath = this._getStringArg(args, "path");
+        const content = this._getStringArg(args, "content");
+        if (!filePath || content === null) {
+          return { ok: false, error: "Invalid arguments for write: path/content must be strings" };
+        }
+        return await this.write(filePath, content);
+      }
       default:
         return {
           ok: false,
@@ -768,6 +812,9 @@ var Decision = class {
   }
 };
 
+// src/kernel/index.ts
+import { randomUUID as randomUUID2 } from "crypto";
+
 // src/kernel/fsm.ts
 var KernelFSM = class {
   context;
@@ -855,13 +902,21 @@ var KernelFSM = class {
 var Kernel = class {
   store;
   action;
+  perception;
+  decision;
   progressSink;
   outcomeSink;
   constructor(options = {}) {
-    this.store = options.store || options.backend;
-    this.action = options.action || null;
-    this.progressSink = options.progressSink || null;
-    this.outcomeSink = options.outcomeSink || null;
+    const store = options.store ?? options.backend;
+    if (!store) {
+      throw new Error("Kernel requires a store/backend implementation.");
+    }
+    this.store = store;
+    this.action = options.action ?? null;
+    this.perception = options.perception ?? new Perception();
+    this.decision = options.decision ?? new Decision();
+    this.progressSink = options.progressSink ?? null;
+    this.outcomeSink = options.outcomeSink ?? null;
   }
   /**
    * Run kernel with options
@@ -878,11 +933,13 @@ var Kernel = class {
       progressSink,
       outcomeSink: perCallOutcomeSink,
       isSimpleChat: forceSimpleChat,
-      promptEmbedding
+      promptEmbedding,
+      trigger = "unknown",
+      outcomeMeta
     } = options;
-    const resolvedOutcomeSink = perCallOutcomeSink || this.outcomeSink;
+    const resolvedOutcomeSink = perCallOutcomeSink ?? this.outcomeSink;
+    const resolvedProgressSink = progressSink ?? this.progressSink;
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
-    const resolvedProgressSink = progressSink || this.progressSink;
     return runWithTrace(traceId, async () => {
       const span = telemetry.startSpan("Kernel.run");
       try {
@@ -903,6 +960,9 @@ var Kernel = class {
           onStep,
           progressSink: resolvedProgressSink,
           progressHeartbeatMs: 6e3,
+          // Components
+          decision: this.decision,
+          perception: this.perception,
           // Runtime State
           state: "PERCEIVING",
           stepCount: 0,
@@ -933,17 +993,17 @@ var Kernel = class {
           maxSteps
         });
         const fsm = new KernelFSM(context);
-        const result = await fsm.run({
-          handlePerceiving: async (ctx) => await this.handlePerceiving(ctx),
-          handleThinking: async (ctx) => await this.handleThinking(ctx),
-          handleDeciding: async (ctx) => await this.handleDeciding(ctx),
-          handleActing: async (ctx) => await this.handleActing(ctx),
-          handleReflecting: async (ctx) => await this.handleReflecting(ctx)
+        await fsm.run({
+          handlePerceiving: async (ctx) => this.handlePerceiving(ctx),
+          handleThinking: async (ctx) => this.handleThinking(ctx),
+          handleDeciding: async (ctx) => this.handleDeciding(ctx),
+          handleActing: async (ctx) => this.handleActing(ctx),
+          handleReflecting: async (ctx) => this.handleReflecting(ctx)
         });
         const durationMs = Date.now() - context.runStartTime;
         const kernelResult = {
           success: context.state === "DONE",
-          status: context.state,
+          status: context.state === "DONE" ? "DONE" : "FAILED",
           content: context.finalResult?.content || "",
           steps: context.stepCount,
           durationMs,
@@ -966,26 +1026,27 @@ var Kernel = class {
               sessionId,
               status: kernelResult.success ? "completed" : "failed",
               content: kernelResult.content,
-              trigger: options.trigger || "unknown",
+              trigger,
               durationMs,
               error: kernelResult.error,
-              metadata: options.outcomeMeta
+              metadata: outcomeMeta
             });
           } catch (sinkErr) {
-            console.warn("[Kernel] outcomeSink.onOutcome failed:", sinkErr.message);
+            console.warn("[Kernel] outcomeSink.onOutcome failed:", this.getErrorMessage(sinkErr));
           }
         }
         return kernelResult;
       } catch (error) {
+        const errorMessage = this.getErrorMessage(error);
         span.end({
           success: false,
-          error: error.message
+          error: errorMessage
         });
         const failedResult = {
           success: false,
           status: "FAILED",
           content: "",
-          error: error.message,
+          error: errorMessage,
           stopReason: "error"
         };
         if (resolvedOutcomeSink) {
@@ -995,10 +1056,10 @@ var Kernel = class {
               sessionId,
               status: "failed",
               content: "",
-              trigger: options.trigger || "unknown",
-              error: error.message
+              trigger,
+              error: errorMessage
             });
-          } catch (_) {
+          } catch {
           }
         }
         return failedResult;
@@ -1011,11 +1072,12 @@ var Kernel = class {
   async saveUserPrompt(taskId, branchId, prompt) {
     const existingMsgs = await this.store.getActiveMessages(taskId, branchId);
     const lastMsg = existingMsgs[existingMsgs.length - 1];
-    if (!lastMsg || lastMsg.senderId !== "user" || lastMsg.content !== prompt) {
+    if (!lastMsg || lastMsg.sender_id !== "user" || lastMsg.content !== prompt) {
       await this.store.saveTaskMessage({
-        taskId,
-        branchId,
-        senderId: "user",
+        id: randomUUID2(),
+        task_id: taskId,
+        branch_id: branchId,
+        sender_id: "user",
         content: prompt,
         payload: {}
       });
@@ -1038,13 +1100,13 @@ var Kernel = class {
       context = {
         ...context,
         sensoryData: perceptionData,
-        contextBlock: perceptionData.state?.contextBlock || "",
+        contextBlock: perceptionData.state.contextBlock || "",
         state: "THINKING"
       };
       span.end();
       return context;
     } catch (error) {
-      span.end({ error: error.message });
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -1068,7 +1130,7 @@ var Kernel = class {
       span.end();
       return context;
     } catch (error) {
-      span.end({ error: error.message });
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -1082,7 +1144,7 @@ var Kernel = class {
       if (turnResult?.toolCalls && turnResult.toolCalls.length > 0) {
         context = {
           ...context,
-          toolsUsed: [...context.toolsUsed, ...turnResult.toolCalls.map((tc) => tc.function?.name)],
+          toolsUsed: [...context.toolsUsed, ...turnResult.toolCalls.map((tc) => tc.function.name)],
           state: "ACTING"
         };
       } else {
@@ -1098,7 +1160,7 @@ var Kernel = class {
       span.end();
       return context;
     } catch (error) {
-      span.end({ error: error.message });
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -1118,6 +1180,14 @@ var Kernel = class {
       }
       const toolResults = [];
       for (const toolCall of turnResult.toolCalls) {
+        if (!this.action) {
+          toolResults.push({
+            ok: false,
+            error: "Action executor not configured"
+          });
+          context.toolFailures++;
+          continue;
+        }
         const result = await this.action.invokeTool(toolCall);
         toolResults.push(result);
         if (!result.ok) {
@@ -1135,7 +1205,7 @@ var Kernel = class {
       span.end();
       return context;
     } catch (error) {
-      span.end({ error: error.message });
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -1152,7 +1222,7 @@ var Kernel = class {
       span.end();
       return context;
     } catch (error) {
-      span.end({ error: error.message });
+      span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
   }
@@ -1160,12 +1230,14 @@ var Kernel = class {
    * Call LLM
    */
   async callLLM(options) {
+    void options;
     return {
       content: "LLM response",
       usage: {
         promptTokens: 0,
         completionTokens: 0
-      }
+      },
+      latencyMs: 0
     };
   }
   /**
@@ -1180,6 +1252,9 @@ var Kernel = class {
         ...data
       });
     }
+  }
+  getErrorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
   }
 };
 
