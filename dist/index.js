@@ -937,6 +937,7 @@ var Kernel = class {
   action;
   perception;
   decision;
+  memory;
   progressSink;
   outcomeSink;
   llmFn;
@@ -949,6 +950,7 @@ var Kernel = class {
     this.action = options.action ?? null;
     this.perception = options.perception ?? new Perception();
     this.decision = options.decision ?? new Decision();
+    this.memory = options.memory ?? null;
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
     this.llmFn = options.llm ?? null;
@@ -1009,6 +1011,8 @@ var Kernel = class {
           task,
           currentBranchId,
           retrievedContext,
+          retrievedMemory: [],
+          conversationHistory: [],
           sensoryData: null,
           contextBlock: "",
           contextBlocks: null,
@@ -1126,19 +1130,36 @@ var Kernel = class {
   async handlePerceiving(context) {
     const span = telemetry.startSpan("Kernel.handlePerceiving");
     try {
-      const perceptionData = await context.perception.gather({
-        prompt: context.originalPrompt,
-        task: context.task,
-        retrievedContext: context.retrievedContext,
-        sessionId: context.sessionId,
-        taskId: context.taskId,
-        isSimpleChat: context.forceSimpleChat
-      });
+      const [perceptionData, memoryItems] = await Promise.all([
+        context.perception.gather({
+          prompt: context.originalPrompt,
+          task: context.task,
+          retrievedContext: context.retrievedContext,
+          sessionId: context.sessionId,
+          taskId: context.taskId,
+          isSimpleChat: context.forceSimpleChat
+        }),
+        this.memory ? this.memory.retrieve(context.originalPrompt, {
+          sessionId: context.sessionId,
+          taskId: context.taskId,
+          scope: "global"
+        }).catch((err) => {
+          console.warn("[Kernel] MemoryProvider.retrieve() failed:", err instanceof Error ? err.message : String(err));
+          return [];
+        }) : Promise.resolve([])
+      ]);
+      const conversationHistory = memoryItems.filter((m) => m.source === "sqlite-history" && m.content.trim()).map((m) => ({
+        role: m.metadata?.["role"] === "assistant" ? "assistant" : "user",
+        content: m.content
+      }));
+      const otherMemory = memoryItems.filter((m) => m.source !== "sqlite-history");
       context = {
         ...context,
         sensoryData: perceptionData,
         contextBlock: perceptionData.state.contextBlock || "",
         contextBlocks: perceptionData.blocks ?? null,
+        retrievedMemory: otherMemory,
+        conversationHistory,
         state: "THINKING"
       };
       span.end();
@@ -1164,10 +1185,19 @@ Stderr: ${e.stderr}` : ""}`).join("\n");
 [Previous Step Failures \u2014 do not retry the same approach]
 ${failureBlock}`;
       }
-      const systemPrompt = context.contextBlocks && context.contextBlocks.length > 0 ? this.assembleSystemPrompt(context.contextBlocks) : context.contextBlock;
+      let systemPrompt = context.contextBlocks && context.contextBlocks.length > 0 ? this.assembleSystemPrompt(context.contextBlocks) : context.contextBlock;
+      if (context.retrievedMemory && context.retrievedMemory.length > 0) {
+        const memoryBlock = context.retrievedMemory.map((m) => `[Memory:${m.source ?? "unknown"}] ${m.content}`).join("\n");
+        systemPrompt = `${systemPrompt}
+
+<retrieved_memory>
+${memoryBlock}
+</retrieved_memory>`;
+      }
       const llmResult = await this.callLLM({
         prompt,
         systemPrompt,
+        conversationHistory: context.conversationHistory.length > 0 ? context.conversationHistory : void 0,
         tools: this.action?.getSpecs?.() ?? []
       });
       context = {

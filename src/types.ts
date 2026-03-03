@@ -162,6 +162,13 @@ export interface IPerceptionOutput {
   lessons: unknown[];
   retrievedContext: unknown[];
   blocks?: ContextBlock[];
+  /**
+   * Structured conversation history for multi-turn LLM calls.
+   * Populated by MemoryProvider-aware bridge/perception implementations.
+   * Format: [{role: 'user'|'assistant'|'system', content: string}, ...]
+   * Does NOT include the current user turn (prompt); that's appended by the LLM implementation.
+   */
+  conversationHistory?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
 }
 
 export interface IPerception {
@@ -211,4 +218,4 @@ export interface OutcomePayload {
 }
 
 // Re-export kernel types for convenience
-export type { LLMCallOptions, LLMCallResult, LLMFunction, ToolEvidence, KernelRunOptions, KernelRunResult } from './kernel/types.js';
+export type { LLMCallOptions, LLMCallResult, LLMFunction, ToolEvidence, KernelRunOptions, KernelRunResult, MemoryItem, MemoryProvider } from './kernel/types.js';

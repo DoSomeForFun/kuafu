@@ -49,7 +49,9 @@ export type {
   ProgressEvent,
   ProgressSink,
   OutcomePayload,
-  OutcomeSink
+  OutcomeSink,
+  MemoryItem,
+  MemoryProvider
 } from './types.js';
 
 // Version

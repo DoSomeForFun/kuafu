@@ -11,6 +11,8 @@ import type {
   LLMCallOptions,
   LLMCallResult,
   LLMFunction,
+  MemoryItem,
+  MemoryProvider,
   ToolEvidence
 } from './types.js';
 import type { ContextBlock, IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink } from '../types.js';
@@ -26,6 +28,7 @@ export class Kernel {
   private action: IAction | null;
   private perception: IPerception;
   private decision: IDecision;
+  private memory: MemoryProvider | null;
   private progressSink: IProgressSink | null;
   private outcomeSink: OutcomeSink | null;
   private llmFn: LLMFunction | null;
@@ -40,6 +43,7 @@ export class Kernel {
     this.action = options.action ?? null;
     this.perception = options.perception ?? (new Perception() as IPerception);
     this.decision = options.decision ?? (new Decision() as IDecision);
+    this.memory = options.memory ?? null;
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
     this.llmFn = options.llm ?? null;
@@ -109,6 +113,8 @@ export class Kernel {
           task,
           currentBranchId,
           retrievedContext,
+          retrievedMemory: [],
+          conversationHistory: [],
           sensoryData: null,
           contextBlock: '',
           contextBlocks: null,
@@ -242,20 +248,45 @@ export class Kernel {
     const span = telemetry.startSpan('Kernel.handlePerceiving');
 
     try {
-      const perceptionData = await context.perception.gather({
-        prompt: context.originalPrompt,
-        task: context.task,
-        retrievedContext: context.retrievedContext,
-        sessionId: context.sessionId,
-        taskId: context.taskId,
-        isSimpleChat: context.forceSimpleChat
-      });
+      // Retrieve memory in parallel with perception
+      const [perceptionData, memoryItems] = await Promise.all([
+        context.perception.gather({
+          prompt: context.originalPrompt,
+          task: context.task,
+          retrievedContext: context.retrievedContext,
+          sessionId: context.sessionId,
+          taskId: context.taskId,
+          isSimpleChat: context.forceSimpleChat
+        }),
+        this.memory
+          ? this.memory.retrieve(context.originalPrompt, {
+              sessionId: context.sessionId,
+              taskId: context.taskId,
+              scope: 'global'
+            }).catch((err: unknown) => {
+              // Non-fatal: log and continue without memory
+              console.warn('[Kernel] MemoryProvider.retrieve() failed:', err instanceof Error ? err.message : String(err));
+              return [] as MemoryItem[];
+            })
+          : Promise.resolve([] as MemoryItem[])
+      ]);
+
+      // Split memory items: history items → conversationHistory, others → retrievedMemory
+      const conversationHistory = memoryItems
+        .filter(m => m.source === 'sqlite-history' && m.content.trim())
+        .map(m => ({
+          role: (m.metadata?.['role'] === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant' | 'system',
+          content: m.content
+        }));
+      const otherMemory = memoryItems.filter(m => m.source !== 'sqlite-history');
 
       context = {
         ...context,
         sensoryData: perceptionData,
         contextBlock: perceptionData.state.contextBlock || '',
         contextBlocks: perceptionData.blocks ?? null,
+        retrievedMemory: otherMemory,
+        conversationHistory,
         state: 'THINKING'
       };
 
@@ -284,14 +315,23 @@ export class Kernel {
         prompt = `${prompt}\n\n[Previous Step Failures — do not retry the same approach]\n${failureBlock}`;
       }
 
-      const systemPrompt =
+      let systemPrompt =
         context.contextBlocks && context.contextBlocks.length > 0
           ? this.assembleSystemPrompt(context.contextBlocks)
           : context.contextBlock;
 
+      // Inject retrieved memory items into the system prompt as a context block
+      if (context.retrievedMemory && context.retrievedMemory.length > 0) {
+        const memoryBlock = context.retrievedMemory
+          .map(m => `[Memory:${m.source ?? 'unknown'}] ${m.content}`)
+          .join('\n');
+        systemPrompt = `${systemPrompt}\n\n<retrieved_memory>\n${memoryBlock}\n</retrieved_memory>`;
+      }
+
       const llmResult = await this.callLLM({
         prompt,
         systemPrompt,
+        conversationHistory: context.conversationHistory.length > 0 ? context.conversationHistory : undefined,
         tools: this.action?.getSpecs?.() ?? []
       });
 

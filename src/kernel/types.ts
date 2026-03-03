@@ -25,6 +25,48 @@ export type KernelState =
   | 'FAILED';
 
 /**
+ * A single item retrieved from memory.
+ */
+export interface MemoryItem {
+  id: string;
+  content: string;
+  /** Relevance score 0–1; higher = more relevant */
+  score?: number;
+  /** Where this memory came from, e.g. 'sqlite', 'memox', 'im-history', 'sop' */
+  source?: string;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Protocol for pluggable memory backends.
+ * kuafu-framework defines this interface; implementations live outside the framework
+ * (bridge, memox adapter, vector store, etc.).
+ *
+ * [Context Anchor]
+ * - Intent: Decouple long-term / semantic memory from the FSM core.
+ * - Constraints: Must not hard-depend on any specific storage system (memox, sqlite, etc.).
+ * - Invariants: retrieve() is always read-only and non-blocking from the FSM perspective.
+ * - Failure Modes: If retrieve() throws, PERCEIVING logs a warning and continues with empty memory.
+ */
+export interface MemoryProvider {
+  /**
+   * Retrieve relevant memory items for the given query/prompt.
+   */
+  retrieve(query: string, options?: {
+    limit?: number;
+    sessionId?: string;
+    taskId?: string;
+    scope?: 'session' | 'global';
+  }): Promise<MemoryItem[]>;
+
+  /**
+   * Optionally persist a memory item after a run completes.
+   * Called with the final assistant response so implementations can update long-term memory.
+   */
+  store?(item: MemoryItem): Promise<void>;
+}
+
+/**
  * Kernel constructor dependencies
  */
 export interface KernelDependencies {
@@ -34,6 +76,7 @@ export interface KernelDependencies {
   action?: IAction;
   perception?: IPerception;
   decision?: IDecision;
+  memory?: MemoryProvider;
   workdir?: string;
   progressSink?: IProgressSink;
   outcomeSink?: OutcomeSink;
@@ -105,6 +148,13 @@ export interface KernelContext {
   task: Task;
   currentBranchId: string;
   retrievedContext: unknown[];
+  /** Memory items fetched during PERCEIVING via MemoryProvider.retrieve() */
+  retrievedMemory: MemoryItem[];
+  /**
+   * Structured conversation history built from retrievedMemory (source='sqlite-history').
+   * Injected as multi-turn messages into the LLM in THINKING state.
+   */
+  conversationHistory: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   sensoryData: IPerceptionOutput | null;
   contextBlock: string;
   contextBlocks: ContextBlock[] | null;
@@ -160,6 +210,14 @@ export interface LLMCallOptions {
   prompt: string;
   systemPrompt?: string;
   history?: unknown[];
+  /**
+   * Structured multi-turn conversation history for LLMs that support it.
+   * When provided, the LLM implementation should use this as the messages array
+   * instead of building one from prompt alone.
+   * Format: [{role: 'user'|'assistant'|'system', content: string}, ...]
+   * The current user turn (prompt) is appended automatically by the LLM implementation.
+   */
+  conversationHistory?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
   tools?: ToolSpec[];
   model?: string;
   temperature?: number;
