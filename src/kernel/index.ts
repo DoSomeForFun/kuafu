@@ -10,7 +10,8 @@ import type {
   KernelRunResult,
   LLMCallOptions,
   LLMCallResult,
-  LLMFunction
+  LLMFunction,
+  ToolEvidence
 } from './types.js';
 import type { IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink } from '../types.js';
 
@@ -113,6 +114,7 @@ export class Kernel {
           turnResult: null,
           advice: null,
           finalResult: null,
+          lastToolEvidence: null,
 
           // Flags
           isReroute: false,
@@ -270,8 +272,18 @@ export class Kernel {
     const span = telemetry.startSpan('Kernel.handleThinking');
 
     try {
+      // If the previous ACTING step had failures, append structured evidence
+      // so the LLM knows what it tried, what failed, and why — not a blank slate.
+      let prompt = context.originalPrompt;
+      if (context.lastToolEvidence && context.lastToolEvidence.length > 0) {
+        const failureBlock = context.lastToolEvidence
+          .map(e => `[Tool Failed] ${e.toolName}(${JSON.stringify(e.arguments)})\nError: ${e.error}${e.stderr ? `\nStderr: ${e.stderr}` : ''}`)
+          .join('\n');
+        prompt = `${prompt}\n\n[Previous Step Failures — do not retry the same approach]\n${failureBlock}`;
+      }
+
       const llmResult = await this.callLLM({
-        prompt: context.originalPrompt,
+        prompt,
         systemPrompt: context.contextBlock
       });
 
@@ -379,13 +391,30 @@ export class Kernel {
 
   /**
    * Handle REFLECTING state
+   * Collects structured evidence from any failed tool calls and stores it in
+   * lastToolEvidence, which the next THINKING step will inject into the LLM prompt.
    */
   private async handleReflecting(context: KernelContext): Promise<KernelContext> {
     const span = telemetry.startSpan('Kernel.handleReflecting');
 
     try {
+      const toolCalls = context.turnResult?.toolCalls ?? [];
+      const toolResults = context.turnResult?.toolResults ?? [];
+
+      const lastToolEvidence: ToolEvidence[] = toolResults
+        .map((result, i) => ({ result, toolCall: toolCalls[i] }))
+        .filter(({ result }) => !result.ok)
+        .map(({ result, toolCall }) => ({
+          toolName: toolCall?.function?.name ?? 'unknown',
+          arguments: (toolCall?.function?.arguments ?? {}) as Record<string, unknown>,
+          error: result.error ?? 'unknown error',
+          stdout: result.stdout,
+          stderr: result.stderr
+        }));
+
       context = {
         ...context,
+        lastToolEvidence: lastToolEvidence.length > 0 ? lastToolEvidence : null,
         state: 'THINKING'
       };
 

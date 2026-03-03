@@ -981,6 +981,7 @@ var Kernel = class {
           turnResult: null,
           advice: null,
           finalResult: null,
+          lastToolEvidence: null,
           // Flags
           isReroute: false,
           // Metrics
@@ -1118,8 +1119,18 @@ var Kernel = class {
   async handleThinking(context) {
     const span = telemetry.startSpan("Kernel.handleThinking");
     try {
+      let prompt = context.originalPrompt;
+      if (context.lastToolEvidence && context.lastToolEvidence.length > 0) {
+        const failureBlock = context.lastToolEvidence.map((e) => `[Tool Failed] ${e.toolName}(${JSON.stringify(e.arguments)})
+Error: ${e.error}${e.stderr ? `
+Stderr: ${e.stderr}` : ""}`).join("\n");
+        prompt = `${prompt}
+
+[Previous Step Failures \u2014 do not retry the same approach]
+${failureBlock}`;
+      }
       const llmResult = await this.callLLM({
-        prompt: context.originalPrompt,
+        prompt,
         systemPrompt: context.contextBlock
       });
       context = {
@@ -1213,12 +1224,24 @@ var Kernel = class {
   }
   /**
    * Handle REFLECTING state
+   * Collects structured evidence from any failed tool calls and stores it in
+   * lastToolEvidence, which the next THINKING step will inject into the LLM prompt.
    */
   async handleReflecting(context) {
     const span = telemetry.startSpan("Kernel.handleReflecting");
     try {
+      const toolCalls = context.turnResult?.toolCalls ?? [];
+      const toolResults = context.turnResult?.toolResults ?? [];
+      const lastToolEvidence = toolResults.map((result, i) => ({ result, toolCall: toolCalls[i] })).filter(({ result }) => !result.ok).map(({ result, toolCall }) => ({
+        toolName: toolCall?.function?.name ?? "unknown",
+        arguments: toolCall?.function?.arguments ?? {},
+        error: result.error ?? "unknown error",
+        stdout: result.stdout,
+        stderr: result.stderr
+      }));
       context = {
         ...context,
+        lastToolEvidence: lastToolEvidence.length > 0 ? lastToolEvidence : null,
         state: "THINKING"
       };
       span.end();

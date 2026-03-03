@@ -39,6 +39,7 @@ export type {
   LLMCallOptions,
   LLMCallResult,
   LLMFunction,
+  ToolEvidence,
   ProgressEvent,
   ProgressSink,
   OutcomePayload,

@@ -108,6 +108,9 @@ export interface KernelContext {
   turnResult: LLMCallResult | null;
   advice: IDecisionResult | null;
   finalResult: KernelFinalResult | null;
+  /** Structured evidence from the last ACTING step's failed tool calls.
+   *  Fed back into the next THINKING prompt so the LLM knows what failed and why. */
+  lastToolEvidence: ToolEvidence[] | null;
 
   // Flags
   isReroute: boolean;
@@ -183,4 +186,17 @@ export interface ToolExecutionResult {
   results: ToolResult[];
   error?: string;
   durationMs: number;
+}
+
+/**
+ * Structured evidence of a single failed tool call.
+ * Carried through KernelContext.lastToolEvidence into the next THINKING step,
+ * so the LLM knows what it tried, what failed, and why.
+ */
+export interface ToolEvidence {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  error: string;
+  stdout?: string;
+  stderr?: string;
 }
