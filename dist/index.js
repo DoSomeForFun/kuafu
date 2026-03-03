@@ -1053,7 +1053,9 @@ var Kernel = class {
             loop: {
               stopReason: finalContext.finalResult?.stopReason,
               durationMs
-            }
+            },
+            // Verifiable Tape: surface injected memory items so callers can store context traces
+            retrievedMemory: finalContext.retrievedMemory
           }
         };
         if (finalContext.state === "DONE" && this.memory?.store && finalContext.finalResult?.content) {

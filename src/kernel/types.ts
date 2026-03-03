@@ -207,6 +207,11 @@ export interface KernelRunResult {
       recipeHit: boolean;
       sessionKey: string;
     };
+    /**
+     * Memory items that were retrieved and injected into the LLM context during PERCEIVING.
+     * Enables context provenance tracing (Verifiable Tape pattern).
+     */
+    retrievedMemory?: MemoryItem[];
   };
 }
 

@@ -160,7 +160,9 @@ export class Kernel {
             loop: {
               stopReason: finalContext.finalResult?.stopReason,
               durationMs
-            }
+            },
+            // Verifiable Tape: surface injected memory items so callers can store context traces
+            retrievedMemory: finalContext.retrievedMemory
           }
         };
 
