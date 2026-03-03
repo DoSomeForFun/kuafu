@@ -1,6 +1,7 @@
 import type { ToolCall, ToolResult } from '../action.js';
 import type {
   IAction,
+  ContextBlock,
   IDecision,
   IDecisionResult,
   IPerception,
@@ -105,6 +106,7 @@ export interface KernelContext {
   retrievedContext: unknown[];
   sensoryData: IPerceptionOutput | null;
   contextBlock: string;
+  contextBlocks: ContextBlock[] | null;
   turnResult: LLMCallResult | null;
   advice: IDecisionResult | null;
   finalResult: KernelFinalResult | null;

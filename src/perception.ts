@@ -1,6 +1,7 @@
 import { telemetry } from './telemetry.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { ContextBlock } from './types.js';
 
 const SOUL_CACHE = { data: null as string | null, ts: 0 };
 const CACHE_TTL = 30000; // 30 seconds
@@ -113,24 +114,48 @@ export class Perception {
     workspace: any | null;
     lessons: any[];
     retrievedContext: any[];
+    blocks?: ContextBlock[];
   }> {
     const span = telemetry.startSpan('Perception.gather');
     
     try {
       const { prompt, task, retrievedContext = [], sessionId, taskId, isSimpleChat } = input;
 
-      // Simple chat mode
+      // Build blocks array
+      const blocks: ContextBlock[] = [];
+
+      // 1. task_goal block - always exists
+      blocks.push({
+        type: 'task_goal',
+        content: prompt,
+        source: 'user_input',
+        label: 'Task'
+      });
+
+      // Simple chat mode - only task_goal block
       if (isSimpleChat) {
         const state = this.observe(sessionId, taskId, task);
         state.isSimpleChat = true;
-        
+
         return {
           skills: [],
           state,
           workspace: null,
           lessons: [],
-          retrievedContext: []
+          retrievedContext: [],
+          blocks
         };
+      }
+
+      // 2. system block - if SOUL.md exists
+      const soulContent = this._getSoul();
+      if (soulContent) {
+        blocks.push({
+          type: 'system',
+          content: soulContent,
+          source: 'SOUL.md',
+          label: 'System'
+        });
       }
 
       // Skill routing (simplified)
@@ -142,16 +167,36 @@ export class Perception {
         skills = [];
       }
 
+      // 3. skill blocks - one block per matched skill
+      for (const skill of skills) {
+        blocks.push({
+          type: 'skill',
+          content: skill.description,
+          source: `skill:${skill.name}`,
+          label: skill.name
+        });
+      }
+
       const state = this.observe(sessionId, taskId, task);
       const workspace = this.observeWorkspace();
       const lessons: any[] = [];
+
+      // 4. retrieved blocks - one block per retrieved context item
+      for (const ctx of retrievedContext) {
+        blocks.push({
+          type: 'retrieved',
+          content: String(ctx),
+          source: 'retrieved_context'
+        });
+      }
 
       return {
         skills,
         state,
         workspace,
         lessons,
-        retrievedContext
+        retrievedContext,
+        blocks
       };
     } catch (e: any) {
       span.end({ error: e.message });

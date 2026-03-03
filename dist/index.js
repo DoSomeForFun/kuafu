@@ -598,6 +598,13 @@ var Perception = class {
     const span = telemetry.startSpan("Perception.gather");
     try {
       const { prompt, task, retrievedContext = [], sessionId, taskId, isSimpleChat } = input;
+      const blocks = [];
+      blocks.push({
+        type: "task_goal",
+        content: prompt,
+        source: "user_input",
+        label: "Task"
+      });
       if (isSimpleChat) {
         const state2 = this.observe(sessionId, taskId, task);
         state2.isSimpleChat = true;
@@ -606,8 +613,18 @@ var Perception = class {
           state: state2,
           workspace: null,
           lessons: [],
-          retrievedContext: []
+          retrievedContext: [],
+          blocks
         };
+      }
+      const soulContent = this._getSoul();
+      if (soulContent) {
+        blocks.push({
+          type: "system",
+          content: soulContent,
+          source: "SOUL.md",
+          label: "System"
+        });
       }
       let skills = [];
       try {
@@ -616,15 +633,31 @@ var Perception = class {
         telemetry.warn("[Perception] Skill routing failed", { error: e.message });
         skills = [];
       }
+      for (const skill of skills) {
+        blocks.push({
+          type: "skill",
+          content: skill.description,
+          source: `skill:${skill.name}`,
+          label: skill.name
+        });
+      }
       const state = this.observe(sessionId, taskId, task);
       const workspace = this.observeWorkspace();
       const lessons = [];
+      for (const ctx of retrievedContext) {
+        blocks.push({
+          type: "retrieved",
+          content: String(ctx),
+          source: "retrieved_context"
+        });
+      }
       return {
         skills,
         state,
         workspace,
         lessons,
-        retrievedContext
+        retrievedContext,
+        blocks
       };
     } catch (e) {
       span.end({ error: e.message });
@@ -978,6 +1011,7 @@ var Kernel = class {
           retrievedContext,
           sensoryData: null,
           contextBlock: "",
+          contextBlocks: null,
           turnResult: null,
           advice: null,
           finalResult: null,
@@ -1104,6 +1138,7 @@ var Kernel = class {
         ...context,
         sensoryData: perceptionData,
         contextBlock: perceptionData.state.contextBlock || "",
+        contextBlocks: perceptionData.blocks ?? null,
         state: "THINKING"
       };
       span.end();
@@ -1129,9 +1164,10 @@ Stderr: ${e.stderr}` : ""}`).join("\n");
 [Previous Step Failures \u2014 do not retry the same approach]
 ${failureBlock}`;
       }
+      const systemPrompt = context.contextBlocks && context.contextBlocks.length > 0 ? this.assembleSystemPrompt(context.contextBlocks) : context.contextBlock;
       const llmResult = await this.callLLM({
         prompt,
-        systemPrompt: context.contextBlock
+        systemPrompt
       });
       context = {
         ...context,
@@ -1250,6 +1286,16 @@ ${failureBlock}`;
       span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
+  }
+  /**
+   * Assemble a structured system prompt from context blocks.
+   */
+  assembleSystemPrompt(blocks) {
+    return blocks.map((block) => {
+      const header = block.label ?? block.type.toUpperCase().replace("_", " ");
+      return `### ${header}${block.source ? ` (source: ${block.source})` : ""}
+${block.content}`;
+    }).join("\n\n");
   }
   /**
    * Call LLM — uses injected llm function if provided, otherwise returns a no-op stub.

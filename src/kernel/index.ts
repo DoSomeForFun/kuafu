@@ -13,7 +13,7 @@ import type {
   LLMFunction,
   ToolEvidence
 } from './types.js';
-import type { IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink } from '../types.js';
+import type { ContextBlock, IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink } from '../types.js';
 
 /**
  * The Unified Kernel - Agent execution orchestrator
@@ -111,6 +111,7 @@ export class Kernel {
           retrievedContext,
           sensoryData: null,
           contextBlock: '',
+          contextBlocks: null,
           turnResult: null,
           advice: null,
           finalResult: null,
@@ -254,6 +255,7 @@ export class Kernel {
         ...context,
         sensoryData: perceptionData,
         contextBlock: perceptionData.state.contextBlock || '',
+        contextBlocks: perceptionData.blocks ?? null,
         state: 'THINKING'
       };
 
@@ -282,9 +284,14 @@ export class Kernel {
         prompt = `${prompt}\n\n[Previous Step Failures — do not retry the same approach]\n${failureBlock}`;
       }
 
+      const systemPrompt =
+        context.contextBlocks && context.contextBlocks.length > 0
+          ? this.assembleSystemPrompt(context.contextBlocks)
+          : context.contextBlock;
+
       const llmResult = await this.callLLM({
         prompt,
-        systemPrompt: context.contextBlock
+        systemPrompt
       });
 
       context = {
@@ -424,6 +431,18 @@ export class Kernel {
       span.end({ error: this.getErrorMessage(error) });
       throw error;
     }
+  }
+
+  /**
+   * Assemble a structured system prompt from context blocks.
+   */
+  private assembleSystemPrompt(blocks: ContextBlock[]): string {
+    return blocks
+      .map((block) => {
+        const header = block.label ?? block.type.toUpperCase().replace('_', ' ');
+        return `### ${header}${block.source ? ` (source: ${block.source})` : ''}\n${block.content}`;
+      })
+      .join('\n\n');
   }
 
   /**

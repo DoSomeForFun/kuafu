@@ -25,6 +25,8 @@ export type {
   IPerceptionInput,
   IPerceptionOutput,
   IPerceptionState,
+  ContextBlock,
+  ContextBlockType,
   ProgressEventLike,
   StoreTaskLike,
   StoreMessageLike,
