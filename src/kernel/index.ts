@@ -271,14 +271,16 @@ export class Kernel {
           : Promise.resolve([] as MemoryItem[])
       ]);
 
-      // Split memory items: history items → conversationHistory, others → retrievedMemory
+      // Split memory items by purpose:
+      // - 'chat_history' → inject as multi-turn conversationHistory for the LLM
+      // - 'knowledge' (default) → inject as <retrieved_memory> block in system prompt
       const conversationHistory = memoryItems
-        .filter(m => m.source === 'sqlite-history' && m.content.trim())
+        .filter(m => m.purpose === 'chat_history' && m.content.trim())
         .map(m => ({
           role: (m.metadata?.['role'] === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant' | 'system',
           content: m.content
         }));
-      const otherMemory = memoryItems.filter(m => m.source !== 'sqlite-history');
+      const otherMemory = memoryItems.filter(m => m.purpose !== 'chat_history');
 
       context = {
         ...context,

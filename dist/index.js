@@ -1148,11 +1148,11 @@ var Kernel = class {
           return [];
         }) : Promise.resolve([])
       ]);
-      const conversationHistory = memoryItems.filter((m) => m.source === "sqlite-history" && m.content.trim()).map((m) => ({
+      const conversationHistory = memoryItems.filter((m) => m.purpose === "chat_history" && m.content.trim()).map((m) => ({
         role: m.metadata?.["role"] === "assistant" ? "assistant" : "user",
         content: m.content
       }));
-      const otherMemory = memoryItems.filter((m) => m.source !== "sqlite-history");
+      const otherMemory = memoryItems.filter((m) => m.purpose !== "chat_history");
       context = {
         ...context,
         sensoryData: perceptionData,

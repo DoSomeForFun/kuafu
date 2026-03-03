@@ -34,6 +34,13 @@ export interface MemoryItem {
   score?: number;
   /** Where this memory came from, e.g. 'sqlite', 'memox', 'im-history', 'sop' */
   source?: string;
+  /**
+   * How the Kernel should use this item:
+   * - 'chat_history': inject as multi-turn messages into the LLM (conversationHistory[])
+   * - 'knowledge': inject as a context block in the system prompt (<retrieved_memory>)
+   * Defaults to 'knowledge' if omitted.
+   */
+  purpose?: 'chat_history' | 'knowledge';
   metadata?: Record<string, unknown>;
 }
 
