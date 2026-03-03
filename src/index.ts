@@ -14,21 +14,6 @@ export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace };
 
 // Types
 export type {
-  Task,
-  TaskStatus,
-  Message,
-  AgentTurn,
-  LLMExecution,
-  ToolCall,
-  KernelRunOptions,
-  KernelRunResult,
-  ProgressEvent,
-  ProgressSink,
-  OutcomePayload,
-  OutcomeSink
-} from './types.js';
-
-export type {
   IStore,
   IAction,
   IProgressSink,
@@ -42,8 +27,23 @@ export type {
   IPerceptionState,
   ProgressEventLike,
   StoreTaskLike,
-  StoreMessageLike
-} from './interfaces.js';
+  StoreMessageLike,
+  Task,
+  TaskStatus,
+  Message,
+  AgentTurn,
+  LLMExecution,
+  ToolCall,
+  KernelRunOptions,
+  KernelRunResult,
+  LLMCallOptions,
+  LLMCallResult,
+  LLMFunction,
+  ProgressEvent,
+  ProgressSink,
+  OutcomePayload,
+  OutcomeSink
+} from './types.js';
 
 // Version
 export const VERSION = '1.2.0-ts';

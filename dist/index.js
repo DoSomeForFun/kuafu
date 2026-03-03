@@ -906,6 +906,7 @@ var Kernel = class {
   decision;
   progressSink;
   outcomeSink;
+  llmFn;
   constructor(options = {}) {
     const store = options.store ?? options.backend;
     if (!store) {
@@ -917,6 +918,7 @@ var Kernel = class {
     this.decision = options.decision ?? new Decision();
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
+    this.llmFn = options.llm ?? null;
   }
   /**
    * Run kernel with options
@@ -1227,16 +1229,17 @@ var Kernel = class {
     }
   }
   /**
-   * Call LLM
+   * Call LLM — uses injected llm function if provided, otherwise returns a no-op stub.
+   * Override by passing `llm` to the constructor: `new Kernel({ store, llm: myLLMFn })`
    */
   async callLLM(options) {
+    if (this.llmFn) {
+      return this.llmFn(options);
+    }
     void options;
     return {
-      content: "LLM response",
-      usage: {
-        promptTokens: 0,
-        completionTokens: 0
-      },
+      content: "",
+      usage: { promptTokens: 0, completionTokens: 0 },
       latencyMs: 0
     };
   }

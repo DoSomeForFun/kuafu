@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { Decision } from '../decision.js';
 import { Perception } from '../perception.js';
 import { telemetry, runWithTrace } from '../telemetry.js';
-import type { IAction, IDecision, IPerception, IProgressSink, IStore } from '../interfaces.js';
 import { KernelFSM } from './fsm.js';
 import type {
   KernelContext,
@@ -10,9 +9,10 @@ import type {
   KernelRunOptions,
   KernelRunResult,
   LLMCallOptions,
-  LLMCallResult
+  LLMCallResult,
+  LLMFunction
 } from './types.js';
-import type { OutcomeSink } from '../types.js';
+import type { IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink } from '../types.js';
 
 /**
  * The Unified Kernel - Agent execution orchestrator
@@ -27,6 +27,7 @@ export class Kernel {
   private decision: IDecision;
   private progressSink: IProgressSink | null;
   private outcomeSink: OutcomeSink | null;
+  private llmFn: LLMFunction | null;
 
   constructor(options: KernelDependencies = {}) {
     const store = options.store ?? options.backend;
@@ -40,6 +41,7 @@ export class Kernel {
     this.decision = options.decision ?? (new Decision() as IDecision);
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
+    this.llmFn = options.llm ?? null;
   }
 
   /**
@@ -396,16 +398,18 @@ export class Kernel {
   }
 
   /**
-   * Call LLM
+   * Call LLM — uses injected llm function if provided, otherwise returns a no-op stub.
+   * Override by passing `llm` to the constructor: `new Kernel({ store, llm: myLLMFn })`
    */
   private async callLLM(options: LLMCallOptions): Promise<LLMCallResult> {
+    if (this.llmFn) {
+      return this.llmFn(options);
+    }
+    // Stub: replace by injecting a real LLM via constructor `llm` option
     void options;
     return {
-      content: 'LLM response',
-      usage: {
-        promptTokens: 0,
-        completionTokens: 0
-      },
+      content: '',
+      usage: { promptTokens: 0, completionTokens: 0 },
       latencyMs: 0
     };
   }

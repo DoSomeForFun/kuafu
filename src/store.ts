@@ -2,8 +2,7 @@ import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
-import type { Task, Message, TaskStatus } from './types.js';
-import type { IStore, SaveTaskMessageInput } from './interfaces.js';
+import type { IStore, Message, SaveTaskMessageInput, Task, TaskStatus } from './types.js';
 
 /**
  * Sensitive content patterns for filtering

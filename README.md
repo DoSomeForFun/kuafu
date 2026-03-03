@@ -34,32 +34,44 @@ Tool execution layer. Register custom actions (shell commands, HTTP calls, etc.)
 
 ```typescript
 import { Kernel, Store } from '@kuafu/framework';
+import type { LLMCallOptions, LLMCallResult } from '@kuafu/framework';
 
-// 1. 初始化存储（':memory:' 或文件路径）
+// 1. 实现 LLM 函数（替换为 OpenAI / Anthropic / 本地模型）
+async function myLLM(options: LLMCallOptions): Promise<LLMCallResult> {
+  // const res = await openai.chat.completions.create({ ... });
+  return { content: 'Hello!', usage: { promptTokens: 10, completionTokens: 5 }, latencyMs: 100 };
+}
+
+// 2. 创建 Store + 任务
 const store = new Store(':memory:');
+await store.createTask({ id: 'task-001', title: 'Demo', date: '2026-01-01' });
 
-// 2. 先创建任务
-const taskId = 'task-001';
-await store.createTask({ id: taskId, title: 'Hello', date: '2026-01-01' });
-
-// 3. 创建 Kernel（继承并覆盖 callLLM 注入真实 LLM）
-const kernel = new Kernel({ store });
+// 3. 创建 Kernel，注入 LLM
+const kernel = new Kernel({ store, llm: myLLM });
 
 // 4. 执行
 const result = await kernel.run({
-  taskId,
+  taskId: 'task-001',
   prompt: 'What is 1+1?',
   sessionId: 'session-001',
   maxSteps: 5
 });
 
-console.log(result.content); // LLM response
 console.log(result.status);  // 'DONE' | 'FAILED'
+console.log(result.content);
 ```
 
-> **注意**：`Kernel.callLLM()` 内置为 stub，实际项目中继承 `Kernel` 并覆盖 `callLLM` 以接入真实 LLM（OpenAI / Anthropic / 本地模型）。
-
 ## API Reference
+
+### Kernel constructor
+
+| Option | Type | Required | Description |
+|--------|------|----------|-------------|
+| `store` | `IStore` | ✅ | Storage backend (use `Store` for SQLite) |
+| `llm` | `LLMFunction` | ✅ | LLM function `(options) => Promise<LLMCallResult>` |
+| `action` | `IAction` | ❌ | Tool executor (use `Action` for shell/file ops) |
+| `progressSink` | `IProgressSink` | ❌ | Real-time step progress callback |
+| `outcomeSink` | `OutcomeSink` | ❌ | Final result callback |
 
 ### Kernel.run(options: KernelRunOptions)
 

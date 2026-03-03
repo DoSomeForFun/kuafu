@@ -1,46 +1,52 @@
 import { Kernel, Store } from '../src/index.js';
+import type { LLMCallOptions, LLMCallResult } from '../src/index.js';
 
 /**
  * Basic Agent Example
  *
- * 演示如何使用 @kuafu/framework 创建最小可运行的 agent。
- * 流程：创建 Store → 创建任务 → 创建 Kernel → run() → 打印结果
- *
- * 注意：Kernel.callLLM() 是可覆盖的 stub。
- * 真实项目中继承 Kernel 并覆盖 callLLM 接入 OpenAI / Anthropic 等。
+ * 演示如何通过构造函数注入真实 LLM，创建最小可运行的 agent。
+ * 流程：Store → createTask → Kernel({ store, llm }) → run()
  */
 
-const TASK_ID = 'example-task-001';
-const SESSION_ID = 'example-session-001';
+// 1. 实现 LLM 函数（这里用 mock，实际替换为 OpenAI / Anthropic 等）
+async function myLLM(options: LLMCallOptions): Promise<LLMCallResult> {
+  console.log('[LLM] prompt length:', options.prompt.length);
+  // 替换为真实调用，例如：
+  // const res = await openai.chat.completions.create({ model: 'gpt-4o', messages: [...] });
+  return {
+    content: `Echo: ${options.prompt.slice(0, 50)}...`,
+    usage: { promptTokens: 100, completionTokens: 20 },
+    latencyMs: 42
+  };
+}
 
 async function main() {
-  // 1. 创建 Store（':memory:' = 内存数据库，不持久化）
+  // 2. 创建 Store（':memory:' = 内存，不持久化）
   const store = new Store(':memory:');
 
-  // 2. 任务必须先存在，Kernel.run() 会从 store 读取它
+  // 3. 任务必须先存在，Kernel.run() 会从 store 读取
+  const taskId = 'example-task-001';
   await store.createTask({
-    id: TASK_ID,
-    title: 'Example: What is 1+1?',
-    date: new Date().toISOString().slice(0, 10),
-    notes: 'Basic framework demo'
+    id: taskId,
+    title: 'Hello from kuafu-framework',
+    date: new Date().toISOString().slice(0, 10)
   });
 
-  // 3. 创建 Kernel，传入 store
-  const kernel = new Kernel({ store });
+  // 4. 创建 Kernel，注入 llm 函数
+  const kernel = new Kernel({ store, llm: myLLM });
 
-  // 4. 执行任务
+  // 5. 执行任务
   const result = await kernel.run({
-    taskId: TASK_ID,
+    taskId,
     prompt: 'What is 1+1?',
-    sessionId: SESSION_ID,
-    maxSteps: 5,
-    contextScope: 'isolated'
+    sessionId: 'session-001',
+    maxSteps: 3
   });
 
-  // 5. 打印结果
-  console.log('Status :', result.status);     // 'DONE' | 'FAILED'
-  console.log('Steps  :', result.steps);
-  console.log('Content:', result.content);
+  // 6. 打印结果
+  console.log('Status  :', result.status);      // 'DONE' | 'FAILED'
+  console.log('Steps   :', result.steps);
+  console.log('Content :', result.content);
   console.log('Duration:', result.durationMs, 'ms');
 }
 

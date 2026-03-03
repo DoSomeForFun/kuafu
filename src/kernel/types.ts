@@ -6,9 +6,10 @@ import type {
   IPerception,
   IPerceptionOutput,
   IProgressSink,
-  IStore
-} from '../interfaces.js';
-import type { OutcomeSink, Task } from '../types.js';
+  IStore,
+  OutcomeSink,
+  Task
+} from '../types.js';
 
 /**
  * Kernel FSM states
@@ -34,8 +35,13 @@ export interface KernelDependencies {
   workdir?: string;
   progressSink?: IProgressSink;
   outcomeSink?: OutcomeSink;
+  /** Inject a real LLM backend. Called for every THINKING step. */
+  llm?: LLMFunction;
   [key: string]: unknown;
 }
+
+/** LLM function signature for constructor injection */
+export type LLMFunction = (options: LLMCallOptions) => Promise<LLMCallResult>;
 
 /**
  * Kernel run options
