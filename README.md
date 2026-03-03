@@ -2,6 +2,8 @@
 
 > Channel-agnostic Agent Runtime Framework (TypeScript)
 
+**Requires Node.js ≥ 20**
+
 A lightweight, embeddable agent runtime with built-in FSM state machine, SQLite persistence, and tool execution. Designed for bots, CLIs, and any channel that needs autonomous agent behavior.
 
 ## Why Kuafu?

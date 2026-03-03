@@ -12,6 +12,10 @@ import { Kernel } from './kernel/index.js';
 
 export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace };
 
+// Types from sub-modules not in types.ts
+export type { DecisionResult } from './decision.js';
+export type { Skill, AgentState } from './perception.js';
+
 // Types
 export type {
   IStore,

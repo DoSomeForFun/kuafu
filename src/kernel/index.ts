@@ -279,7 +279,7 @@ export class Kernel {
       let prompt = context.originalPrompt;
       if (context.lastToolEvidence && context.lastToolEvidence.length > 0) {
         const failureBlock = context.lastToolEvidence
-          .map(e => `[Tool Failed] ${e.toolName}(${JSON.stringify(e.arguments)})\nError: ${e.error}${e.stderr ? `\nStderr: ${e.stderr}` : ''}`)
+          .map(e => `[Tool Failed] ${e.toolName}\nError: ${e.error}${e.stderr ? `\nStderr: ${e.stderr}` : ''}`)
           .join('\n');
         prompt = `${prompt}\n\n[Previous Step Failures — do not retry the same approach]\n${failureBlock}`;
       }
@@ -371,7 +371,10 @@ export class Kernel {
           continue;
         }
 
-        const result = await this.action.invokeTool(toolCall);
+        const result = await this.action.invokeTool(toolCall).catch((err: unknown) => ({
+          ok: false as const,
+          error: this.getErrorMessage(err)
+        }));
         toolResults.push(result);
 
         if (!result.ok) {
@@ -413,7 +416,6 @@ export class Kernel {
         .filter(({ result }) => !result.ok)
         .map(({ result, toolCall }) => ({
           toolName: toolCall?.function?.name ?? 'unknown',
-          arguments: (toolCall?.function?.arguments ?? {}) as Record<string, unknown>,
           error: result.error ?? 'unknown error',
           stdout: result.stdout,
           stderr: result.stderr
@@ -451,7 +453,11 @@ export class Kernel {
    */
   private async callLLM(options: LLMCallOptions): Promise<LLMCallResult> {
     if (this.llmFn) {
-      return this.llmFn(options);
+      try {
+        return await this.llmFn(options);
+      } catch (err: unknown) {
+        throw new Error(`LLM call failed: ${this.getErrorMessage(err)}`);
+      }
     }
     // Stub: replace by injecting a real LLM via constructor `llm` option
     void options;

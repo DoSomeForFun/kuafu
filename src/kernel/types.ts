@@ -29,6 +29,7 @@ export type KernelState =
  */
 export interface KernelDependencies {
   store?: IStore;
+  /** @deprecated Use `store` instead. */
   backend?: IStore;
   action?: IAction;
   perception?: IPerception;
@@ -197,7 +198,7 @@ export interface ToolExecutionResult {
  */
 export interface ToolEvidence {
   toolName: string;
-  arguments: Record<string, unknown>;
+  /** Note: arguments intentionally excluded to prevent sensitive data leakage into LLM prompts. */
   error: string;
   stdout?: string;
   stderr?: string;
