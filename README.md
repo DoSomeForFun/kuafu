@@ -284,3 +284,19 @@ console.log('same?', original === replayed.content);
 - **Regression testing** — lock a prompt + context, assert output doesn't change after model updates  
 - **Prompt auditing** — full audit trail of every LLM call
 - **A/B testing** — replay same trace against different models
+
+## Acknowledgements
+
+Kuafu's design is inspired by **[bub](https://github.com/bubbuild/bub)** — a collaborative agent framework built around the principle that context should be explicit, verifiable, and handoff-friendly rather than opaque inherited state.
+
+Key ideas borrowed from bub:
+- **Verifiable Tape** — treating every LLM interaction as an auditable, replayable record
+- **Channel-neutral execution** — agent behavior that doesn't depend on a specific IM product
+- **Explicit context assembly** — reconstructing context from interaction history rather than relying on ambient state
+
+> *"Systems are judged by how well teams can inspect, review, and continue work together."*  
+> — [Socialized Evaluation](https://psiace.me/posts/im-and-socialized-evaluation/), the philosophy behind bub
+
+## License
+
+MIT © [DoSomeForFun](https://github.com/DoSomeForFun)
