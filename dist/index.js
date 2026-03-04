@@ -1222,32 +1222,30 @@ ${memoryBlock}
       });
       if (this.traceSink) {
         const traceId = `trace-${context.taskId}-step-${context.stepCount}-${Date.now()}`;
-        try {
-          this.traceSink.onTrace({
-            traceId,
-            taskId: context.taskId,
-            sessionId: context.sessionId,
-            stepCount: context.stepCount,
+        Promise.resolve(this.traceSink.onTrace({
+          traceId,
+          taskId: context.taskId,
+          sessionId: context.sessionId,
+          stepCount: context.stepCount,
+          model: llmResult.model,
+          prompt,
+          systemPrompt,
+          conversationHistory: context.conversationHistory,
+          retrievedMemory: context.retrievedMemory.map((m) => ({ id: m.id, content: m.content, source: m.source, purpose: m.purpose })),
+          contextBlocks: context.contextBlocks,
+          toolSpecs: this.action?.getSpecs?.() ?? [],
+          llmResult: {
+            content: llmResult.content,
             model: llmResult.model,
-            prompt,
-            systemPrompt,
-            conversationHistory: context.conversationHistory,
-            retrievedMemory: context.retrievedMemory.map((m) => ({ id: m.id, content: m.content, source: m.source, purpose: m.purpose })),
-            contextBlocks: context.contextBlocks,
-            toolSpecs: this.action?.getSpecs?.() ?? [],
-            llmResult: {
-              content: llmResult.content,
-              model: llmResult.model,
-              thinking: llmResult.thinking,
-              toolCalls: llmResult.toolCalls,
-              usage: llmResult.usage,
-              latencyMs: llmResult.latencyMs
-            },
-            timestamp: Date.now()
-          });
-        } catch (traceErr) {
+            thinking: llmResult.thinking,
+            toolCalls: llmResult.toolCalls,
+            usage: llmResult.usage,
+            latencyMs: llmResult.latencyMs
+          },
+          timestamp: Date.now()
+        })).catch((traceErr) => {
           console.warn("[Kernel] traceSink.onTrace failed:", this.getErrorMessage(traceErr));
-        }
+        });
       }
       context = {
         ...context,
