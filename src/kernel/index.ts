@@ -35,6 +35,7 @@ export class Kernel {
   private actionSink: ((record: ToolActionRecord) => void) | null;
   private traceSink: TraceSink | null;
   private llmFn: LLMFunction | null;
+  private maxRetries: number;
 
   constructor(options: KernelDependencies = {}) {
     const store = options.store ?? options.backend;
@@ -52,6 +53,7 @@ export class Kernel {
     this.actionSink = options.actionSink ?? null;
     this.traceSink = options.traceSink ?? null;
     this.llmFn = options.llm ?? null;
+    this.maxRetries = options.maxRetries ?? 2;
   }
 
   /**
@@ -561,11 +563,20 @@ export class Kernel {
    */
   private async callLLM(options: LLMCallOptions): Promise<LLMCallResult> {
     if (this.llmFn) {
-      try {
-        return await this.llmFn(options);
-      } catch (err: unknown) {
-        throw new Error(`LLM call failed: ${this.getErrorMessage(err)}`);
+      let lastErr: unknown;
+      for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+        try {
+          return await this.llmFn(options);
+        } catch (err: unknown) {
+          lastErr = err;
+          if (attempt < this.maxRetries) {
+            const delayMs = 500 * Math.pow(2, attempt);
+            console.warn(`[Kernel] LLM call failed (attempt ${attempt + 1}/${this.maxRetries + 1}), retrying in ${delayMs}ms:`, this.getErrorMessage(err));
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+        }
       }
+      throw new Error(`LLM call failed after ${this.maxRetries + 1} attempts: ${this.getErrorMessage(lastErr)}`);
     }
     // Stub: replace by injecting a real LLM via constructor `llm` option
     void options;

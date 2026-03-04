@@ -311,6 +311,63 @@ async function runWithTrace(traceId, fn) {
     throw error;
   }
 }
+var ConsoleSink = class {
+  onTrace(payload) {
+    console.log("[kuafu:trace]", JSON.stringify({
+      traceId: payload.traceId,
+      taskId: payload.taskId,
+      step: payload.stepCount,
+      model: payload.model,
+      latencyMs: payload.llmResult.latencyMs,
+      promptLen: payload.systemPrompt?.length ?? 0,
+      responseLen: payload.llmResult.content?.length ?? 0
+    }, null, 2));
+  }
+};
+var SQLiteSink = class {
+  db;
+  ready = false;
+  constructor(store) {
+    this.db = store.db;
+  }
+  ensureTable() {
+    if (this.ready) return;
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS kuafu_traces_log (
+        id TEXT PRIMARY KEY,
+        task_id TEXT,
+        session_id TEXT,
+        step_count INTEGER,
+        model TEXT,
+        system_prompt TEXT,
+        conversation_history TEXT,
+        llm_response TEXT,
+        latency_ms INTEGER,
+        created_at INTEGER
+      )
+    `);
+    this.ready = true;
+  }
+  onTrace(payload) {
+    this.ensureTable();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO kuafu_traces_log
+        (id, task_id, session_id, step_count, model, system_prompt, conversation_history, llm_response, latency_ms, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      payload.traceId,
+      payload.taskId,
+      payload.sessionId,
+      payload.stepCount,
+      payload.model ?? null,
+      payload.systemPrompt ?? null,
+      JSON.stringify(payload.conversationHistory ?? []),
+      payload.llmResult.content ?? null,
+      payload.llmResult.latencyMs ?? null,
+      Date.now()
+    );
+  }
+};
 
 // src/action.ts
 import fs2 from "fs";
@@ -943,6 +1000,7 @@ var Kernel = class {
   actionSink;
   traceSink;
   llmFn;
+  maxRetries;
   constructor(options = {}) {
     const store = options.store ?? options.backend;
     if (!store) {
@@ -958,6 +1016,7 @@ var Kernel = class {
     this.actionSink = options.actionSink ?? null;
     this.traceSink = options.traceSink ?? null;
     this.llmFn = options.llm ?? null;
+    this.maxRetries = options.maxRetries ?? 2;
   }
   /**
    * Run kernel with options
@@ -1394,11 +1453,20 @@ ${block.content}`;
    */
   async callLLM(options) {
     if (this.llmFn) {
-      try {
-        return await this.llmFn(options);
-      } catch (err) {
-        throw new Error(`LLM call failed: ${this.getErrorMessage(err)}`);
+      let lastErr;
+      for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+        try {
+          return await this.llmFn(options);
+        } catch (err) {
+          lastErr = err;
+          if (attempt < this.maxRetries) {
+            const delayMs = 500 * Math.pow(2, attempt);
+            console.warn(`[Kernel] LLM call failed (attempt ${attempt + 1}/${this.maxRetries + 1}), retrying in ${delayMs}ms:`, this.getErrorMessage(err));
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+        }
       }
+      throw new Error(`LLM call failed after ${this.maxRetries + 1} attempts: ${this.getErrorMessage(lastErr)}`);
     }
     void options;
     return {
@@ -1443,14 +1511,18 @@ var kuafuFramework = {
   Decision,
   Kernel,
   telemetry,
-  runWithTrace
+  runWithTrace,
+  ConsoleSink,
+  SQLiteSink
 };
 var index_default = kuafuFramework;
 export {
   Action,
+  ConsoleSink,
   Decision,
   Kernel,
   Perception,
+  SQLiteSink,
   Store,
   VERSION,
   index_default as default,

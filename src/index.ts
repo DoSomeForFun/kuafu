@@ -4,13 +4,13 @@
 
 // Core modules
 import { Store } from './store.js';
-import { telemetry, runWithTrace } from './telemetry.js';
+import { telemetry, runWithTrace, ConsoleSink, SQLiteSink } from './telemetry.js';
 import { Action } from './action.js';
 import { Perception } from './perception.js';
 import { Decision } from './decision.js';
 import { Kernel } from './kernel/index.js';
 
-export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace };
+export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace, ConsoleSink, SQLiteSink };
 
 // Types from sub-modules not in types.ts
 export type { DecisionResult } from './decision.js';
@@ -65,7 +65,9 @@ const kuafuFramework = {
   Decision,
   Kernel,
   telemetry,
-  runWithTrace
+  runWithTrace,
+  ConsoleSink,
+  SQLiteSink
 };
 
 export default kuafuFramework;

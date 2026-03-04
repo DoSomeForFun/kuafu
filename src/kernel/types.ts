@@ -95,6 +95,12 @@ export interface KernelDependencies {
   traceSink?: TraceSink;
   /** Inject a real LLM backend. Called for every THINKING step. */
   llm?: LLMFunction;
+  /**
+   * Max LLM retry attempts on transient failures (network errors, 5xx).
+   * Retries use exponential backoff: 500ms, 1000ms, 2000ms...
+   * @default 2
+   */
+  maxRetries?: number;
   [key: string]: unknown;
 }
 

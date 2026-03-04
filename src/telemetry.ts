@@ -110,3 +110,77 @@ export default {
   telemetry,
   runWithTrace
 };
+
+import type { TraceSink, TracePayload } from './types.js';
+
+/**
+ * ConsoleSink — development TraceSink that prints each trace to stdout.
+ * Usage: `new Kernel({ store, llm, traceSink: new ConsoleSink() })`
+ */
+export class ConsoleSink implements TraceSink {
+  onTrace(payload: TracePayload): void {
+    console.log('[kuafu:trace]', JSON.stringify({
+      traceId: payload.traceId,
+      taskId: payload.taskId,
+      step: payload.stepCount,
+      model: payload.model,
+      latencyMs: payload.llmResult.latencyMs,
+      promptLen: payload.systemPrompt?.length ?? 0,
+      responseLen: payload.llmResult.content?.length ?? 0,
+    }, null, 2));
+  }
+}
+
+/**
+ * SQLiteSink — production TraceSink that persists traces to a SQLite table.
+ *
+ * Creates table `kuafu_traces_log` if not exists.
+ * Usage: `new Kernel({ store, llm, traceSink: new SQLiteSink(store) })`
+ */
+export class SQLiteSink implements TraceSink {
+  private db: import('better-sqlite3').Database;
+  private ready = false;
+
+  constructor(store: { db: import('better-sqlite3').Database }) {
+    this.db = store.db;
+  }
+
+  private ensureTable(): void {
+    if (this.ready) return;
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS kuafu_traces_log (
+        id TEXT PRIMARY KEY,
+        task_id TEXT,
+        session_id TEXT,
+        step_count INTEGER,
+        model TEXT,
+        system_prompt TEXT,
+        conversation_history TEXT,
+        llm_response TEXT,
+        latency_ms INTEGER,
+        created_at INTEGER
+      )
+    `);
+    this.ready = true;
+  }
+
+  onTrace(payload: TracePayload): void {
+    this.ensureTable();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO kuafu_traces_log
+        (id, task_id, session_id, step_count, model, system_prompt, conversation_history, llm_response, latency_ms, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      payload.traceId,
+      payload.taskId,
+      payload.sessionId,
+      payload.stepCount,
+      payload.model ?? null,
+      payload.systemPrompt ?? null,
+      JSON.stringify(payload.conversationHistory ?? []),
+      payload.llmResult.content ?? null,
+      payload.llmResult.latencyMs ?? null,
+      Date.now()
+    );
+  }
+}
