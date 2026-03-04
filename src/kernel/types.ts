@@ -87,6 +87,8 @@ export interface KernelDependencies {
   workdir?: string;
   progressSink?: IProgressSink;
   outcomeSink?: OutcomeSink;
+  /** Callback invoked after each tool call in ACTING state for execution provenance. */
+  actionSink?: (record: ToolActionRecord) => void;
   /** Inject a real LLM backend. Called for every THINKING step. */
   llm?: LLMFunction;
   [key: string]: unknown;
@@ -273,4 +275,21 @@ export interface ToolEvidence {
   error: string;
   stdout?: string;
   stderr?: string;
+}
+
+/**
+ * Tool execution provenance record — emitted via actionSink after each tool call in ACTING state.
+ * [Context Anchor]
+ * - Intent: Verifiable Tape for tool executions (bub pattern) — record what the agent actually did.
+ * - Invariants: Always emitted after invokeTool returns, never blocks the main FSM flow.
+ */
+export interface ToolActionRecord {
+  id: string;
+  taskId: string;
+  sessionId: string;
+  toolName: string;
+  toolArgs: Record<string, unknown>;
+  toolResult: { ok: boolean; stdout?: string; stderr?: string; error?: string; output?: unknown };
+  durationMs: number;
+  createdAt: number;
 }

@@ -13,6 +13,7 @@ import type {
   LLMFunction,
   MemoryItem,
   MemoryProvider,
+  ToolActionRecord,
   ToolEvidence
 } from './types.js';
 import type { ContextBlock, IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink } from '../types.js';
@@ -31,6 +32,7 @@ export class Kernel {
   private memory: MemoryProvider | null;
   private progressSink: IProgressSink | null;
   private outcomeSink: OutcomeSink | null;
+  private actionSink: ((record: ToolActionRecord) => void) | null;
   private llmFn: LLMFunction | null;
 
   constructor(options: KernelDependencies = {}) {
@@ -46,6 +48,7 @@ export class Kernel {
     this.memory = options.memory ?? null;
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
+    this.actionSink = options.actionSink ?? null;
     this.llmFn = options.llm ?? null;
   }
 
@@ -423,12 +426,17 @@ export class Kernel {
 
       const toolResults = [];
       for (const toolCall of turnResult.toolCalls) {
+        const toolStartMs = Date.now();
+
         if (!this.action) {
-          toolResults.push({
-            ok: false,
-            error: 'Action executor not configured'
-          });
+          const noActionResult = { ok: false as const, error: 'Action executor not configured' };
+          toolResults.push(noActionResult);
           context.toolFailures++;
+          if (this.actionSink) {
+            try {
+              this.actionSink({ id: randomUUID(), taskId: context.taskId, sessionId: context.sessionId, toolName: toolCall.function?.name ?? 'unknown', toolArgs: this.parseToolArgs(toolCall.function?.arguments), toolResult: noActionResult, durationMs: Date.now() - toolStartMs, createdAt: Date.now() });
+            } catch { /* non-fatal */ }
+          }
           continue;
         }
 
@@ -440,6 +448,13 @@ export class Kernel {
 
         if (!result.ok) {
           context.toolFailures++;
+        }
+
+        // Fire-and-forget: record tool execution provenance (Verifiable Tape)
+        if (this.actionSink) {
+          try {
+            this.actionSink({ id: randomUUID(), taskId: context.taskId, sessionId: context.sessionId, toolName: toolCall.function?.name ?? 'unknown', toolArgs: this.parseToolArgs(toolCall.function?.arguments), toolResult: result, durationMs: Date.now() - toolStartMs, createdAt: Date.now() });
+          } catch { /* non-fatal */ }
         }
       }
 
@@ -541,6 +556,11 @@ export class Kernel {
         ...data
       });
     }
+  }
+
+  private parseToolArgs(args: unknown): Record<string, unknown> {
+    if (typeof args === 'object') return args as Record<string, unknown>;
+    try { return JSON.parse(String(args)); } catch { return { _raw: String(args) }; }
   }
 
   private getErrorMessage(error: unknown): string {

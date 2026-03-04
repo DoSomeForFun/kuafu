@@ -192,3 +192,37 @@ KUAFU_CONTEXT_BUDGET_CHARS=12000
 ```
 
 Priority order: handoff items (tags=handoff) → highest score → insertion order.
+
+### kuafu_actions Table (Tool Execution Provenance)
+
+Records every tool call made during the ACTING FSM state. Together with `kuafu_traces` (memory provenance), forms the complete Verifiable Tape.
+
+```sql
+CREATE TABLE kuafu_actions (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  session_id TEXT,
+  tool_name TEXT NOT NULL,
+  tool_args TEXT DEFAULT '{}',    -- JSON: tool call arguments
+  tool_result TEXT DEFAULT '{}',  -- JSON: {ok, stdout, stderr, error}
+  success INTEGER DEFAULT 1,      -- 1=ok, 0=failed
+  duration_ms INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+```
+
+Query recent tool executions:
+```sql
+SELECT task_id, tool_name, success, duration_ms,
+       substr(tool_args, 1, 80) as args_preview,
+       datetime(created_at/1000,'unixepoch') as ts
+FROM kuafu_actions ORDER BY created_at DESC LIMIT 20;
+```
+
+### Complete Verifiable Tape
+
+| Table | Records | Purpose |
+|---|---|---|
+| `kuafu_traces` | Memory items injected per LLM call | Why did the agent know X? |
+| `kuafu_actions` | Tool calls + results per ACTING step | What did the agent actually do? |
+| `kuafu_facts` | Extracted facts + handoff summaries | What did the agent learn? |

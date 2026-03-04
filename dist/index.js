@@ -940,6 +940,7 @@ var Kernel = class {
   memory;
   progressSink;
   outcomeSink;
+  actionSink;
   llmFn;
   constructor(options = {}) {
     const store = options.store ?? options.backend;
@@ -953,6 +954,7 @@ var Kernel = class {
     this.memory = options.memory ?? null;
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
+    this.actionSink = options.actionSink ?? null;
     this.llmFn = options.llm ?? null;
   }
   /**
@@ -1276,12 +1278,17 @@ ${memoryBlock}
       }
       const toolResults = [];
       for (const toolCall of turnResult.toolCalls) {
+        const toolStartMs = Date.now();
         if (!this.action) {
-          toolResults.push({
-            ok: false,
-            error: "Action executor not configured"
-          });
+          const noActionResult = { ok: false, error: "Action executor not configured" };
+          toolResults.push(noActionResult);
           context.toolFailures++;
+          if (this.actionSink) {
+            try {
+              this.actionSink({ id: randomUUID2(), taskId: context.taskId, sessionId: context.sessionId, toolName: toolCall.function?.name ?? "unknown", toolArgs: this.parseToolArgs(toolCall.function?.arguments), toolResult: noActionResult, durationMs: Date.now() - toolStartMs, createdAt: Date.now() });
+            } catch {
+            }
+          }
           continue;
         }
         const result = await this.action.invokeTool(toolCall).catch((err) => ({
@@ -1291,6 +1298,12 @@ ${memoryBlock}
         toolResults.push(result);
         if (!result.ok) {
           context.toolFailures++;
+        }
+        if (this.actionSink) {
+          try {
+            this.actionSink({ id: randomUUID2(), taskId: context.taskId, sessionId: context.sessionId, toolName: toolCall.function?.name ?? "unknown", toolArgs: this.parseToolArgs(toolCall.function?.arguments), toolResult: result, durationMs: Date.now() - toolStartMs, createdAt: Date.now() });
+          } catch {
+          }
         }
       }
       context = {
@@ -1376,6 +1389,14 @@ ${block.content}`;
         sessionId: context.sessionId,
         ...data
       });
+    }
+  }
+  parseToolArgs(args) {
+    if (typeof args === "object") return args;
+    try {
+      return JSON.parse(String(args));
+    } catch {
+      return { _raw: String(args) };
     }
   }
   getErrorMessage(error) {
