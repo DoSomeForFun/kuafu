@@ -9,7 +9,8 @@ import type {
   IProgressSink,
   IStore,
   OutcomeSink,
-  Task
+  Task,
+  TraceSink
 } from '../types.js';
 
 /**
@@ -89,6 +90,9 @@ export interface KernelDependencies {
   outcomeSink?: OutcomeSink;
   /** Callback invoked after each tool call in ACTING state for execution provenance. */
   actionSink?: (record: ToolActionRecord) => void;
+  /** Trace sink — kernel-side callback for Deterministic Context Assembly.
+   * Emitted after each LLM call in THINKING state. */
+  traceSink?: TraceSink;
   /** Inject a real LLM backend. Called for every THINKING step. */
   llm?: LLMFunction;
   [key: string]: unknown;
@@ -244,6 +248,8 @@ export interface LLMCallOptions {
  */
 export interface LLMCallResult {
   content: string;
+  /** Model used for this LLM call */
+  model?: string;
   thinking?: string;
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];

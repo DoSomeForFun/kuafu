@@ -941,6 +941,7 @@ var Kernel = class {
   progressSink;
   outcomeSink;
   actionSink;
+  traceSink;
   llmFn;
   constructor(options = {}) {
     const store = options.store ?? options.backend;
@@ -955,6 +956,7 @@ var Kernel = class {
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
     this.actionSink = options.actionSink ?? null;
+    this.traceSink = options.traceSink ?? null;
     this.llmFn = options.llm ?? null;
   }
   /**
@@ -1218,6 +1220,35 @@ ${memoryBlock}
         conversationHistory: context.conversationHistory.length > 0 ? context.conversationHistory : void 0,
         tools: this.action?.getSpecs?.() ?? []
       });
+      if (this.traceSink) {
+        const traceId = `trace-${context.taskId}-step-${context.stepCount}-${Date.now()}`;
+        try {
+          this.traceSink.onTrace({
+            traceId,
+            taskId: context.taskId,
+            sessionId: context.sessionId,
+            stepCount: context.stepCount,
+            model: llmResult.model,
+            prompt,
+            systemPrompt,
+            conversationHistory: context.conversationHistory,
+            retrievedMemory: context.retrievedMemory.map((m) => ({ id: m.id, content: m.content, source: m.source, purpose: m.purpose })),
+            contextBlocks: context.contextBlocks,
+            toolSpecs: this.action?.getSpecs?.() ?? [],
+            llmResult: {
+              content: llmResult.content,
+              model: llmResult.model,
+              thinking: llmResult.thinking,
+              toolCalls: llmResult.toolCalls,
+              usage: llmResult.usage,
+              latencyMs: llmResult.latencyMs
+            },
+            timestamp: Date.now()
+          });
+        } catch (traceErr) {
+          console.warn("[Kernel] traceSink.onTrace failed:", this.getErrorMessage(traceErr));
+        }
+      }
       context = {
         ...context,
         turnResult: llmResult,

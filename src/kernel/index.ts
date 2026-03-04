@@ -16,7 +16,7 @@ import type {
   ToolActionRecord,
   ToolEvidence
 } from './types.js';
-import type { ContextBlock, IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink } from '../types.js';
+import type { ContextBlock, IAction, IDecision, IPerception, IProgressSink, IStore, OutcomeSink, TraceSink } from '../types.js';
 
 /**
  * The Unified Kernel - Agent execution orchestrator
@@ -33,6 +33,7 @@ export class Kernel {
   private progressSink: IProgressSink | null;
   private outcomeSink: OutcomeSink | null;
   private actionSink: ((record: ToolActionRecord) => void) | null;
+  private traceSink: TraceSink | null;
   private llmFn: LLMFunction | null;
 
   constructor(options: KernelDependencies = {}) {
@@ -49,6 +50,7 @@ export class Kernel {
     this.progressSink = options.progressSink ?? null;
     this.outcomeSink = options.outcomeSink ?? null;
     this.actionSink = options.actionSink ?? null;
+    this.traceSink = options.traceSink ?? null;
     this.llmFn = options.llm ?? null;
   }
 
@@ -357,6 +359,38 @@ export class Kernel {
         conversationHistory: context.conversationHistory.length > 0 ? context.conversationHistory : undefined,
         tools: this.action?.getSpecs?.() ?? []
       });
+
+      // Fire-and-forget: emit trace for Deterministic Context Assembly
+      if (this.traceSink) {
+        const traceId = `trace-${context.taskId}-step-${context.stepCount}-${Date.now()}`;
+        try {
+          this.traceSink.onTrace({
+            traceId,
+            taskId: context.taskId,
+            sessionId: context.sessionId,
+            stepCount: context.stepCount,
+            model: llmResult.model,
+            prompt,
+            systemPrompt,
+            conversationHistory: context.conversationHistory,
+            retrievedMemory: context.retrievedMemory.map(m => ({ id: m.id, content: m.content, source: m.source, purpose: m.purpose })),
+            contextBlocks: context.contextBlocks,
+            toolSpecs: this.action?.getSpecs?.() ?? [],
+            llmResult: {
+              content: llmResult.content,
+              model: llmResult.model,
+              thinking: llmResult.thinking,
+              toolCalls: llmResult.toolCalls,
+              usage: llmResult.usage,
+              latencyMs: llmResult.latencyMs
+            },
+            timestamp: Date.now()
+          });
+        } catch (traceErr) {
+          // Non-fatal: log and continue
+          console.warn('[Kernel] traceSink.onTrace failed:', this.getErrorMessage(traceErr));
+        }
+      }
 
       context = {
         ...context,

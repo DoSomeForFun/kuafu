@@ -203,6 +203,53 @@ export interface OutcomeSink {
 }
 
 /**
+ * Trace sink — kernel-side callback for Deterministic Context Assembly.
+ * Emitted after each LLM call in THINKING state, passing the complete context
+ * so external systems can store/replay the exact context that led to each LLM response.
+ */
+export interface TraceSink {
+  onTrace(payload: TracePayload): void | Promise<void>;
+}
+
+/**
+ * Trace payload — emitted by Kernel after each LLM call in THINKING state.
+ * Contains the complete context snapshot for deterministic replay and auditing.
+ */
+export interface TracePayload {
+  /** Unique trace ID for this LLM call */
+  traceId: string;
+  taskId: string;
+  sessionId: string;
+  /** FSM step count when this LLM call was made */
+  stepCount: number;
+  /** LLM model used for this call */
+  model?: string;
+  /** The original user prompt */
+  prompt: string;
+  /** Assembled system prompt (from context blocks + memory) */
+  systemPrompt: string;
+  /** Conversation history at the time of LLM call */
+  conversationHistory: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  /** Retrieved memory items injected into context */
+  retrievedMemory: Array<{ id: string; content: string; source?: string; purpose?: string }>;
+  /** Context blocks from perception */
+  contextBlocks: ContextBlock[] | null;
+  /** Tool specs available to the LLM */
+  toolSpecs: ToolSpec[];
+  /** LLM response */
+  llmResult: {
+    content: string;
+    model?: string;
+    thinking?: string;
+    toolCalls?: ToolCall[];
+    usage?: { promptTokens: number; completionTokens: number };
+    latencyMs?: number;
+  };
+  /** Timestamp of this LLM call */
+  timestamp: number;
+}
+
+/**
  * Outcome payload — emitted by Kernel when a task completes or fails.
  * Consumed by any OutcomeSink implementation (bridge, adapters, etc.)
  */
