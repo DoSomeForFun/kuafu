@@ -226,3 +226,61 @@ FROM kuafu_actions ORDER BY created_at DESC LIMIT 20;
 | `kuafu_traces` | Memory items injected per LLM call | Why did the agent know X? |
 | `kuafu_actions` | Tool calls + results per ACTING step | What did the agent actually do? |
 | `kuafu_facts` | Extracted facts + handoff summaries | What did the agent learn? |
+
+## Verifiable Tape & Replay Engine
+
+Every LLM call emitted by the Kernel is recorded as a **Tape entry** — a deterministic, content-addressable snapshot containing the full context needed to replay the call.
+
+### What gets recorded
+
+Each trace entry captures:
+- `traceId` — unique UUID per LLM call
+- `taskId` / `sessionId` — execution context
+- `systemPrompt` — stored once per unique content (content-addressable via SHA-256)
+- `conversationHistory` — full message history at point of call
+- `llmResponse` — the raw model output
+- `model` — model identifier
+- `stepCount` — which reasoning step triggered this call
+- `latencyMs` — wall-clock LLM latency
+
+### Enabling the Tape
+
+Implement the `TraceSink` interface and pass it to the Kernel:
+
+```typescript
+import type { TraceSink, TracePayload } from '@kuafu/framework';
+
+const myTraceSink: TraceSink = {
+  onTrace(payload: TracePayload): void | Promise<void> {
+    // persist to SQLite, S3, stdout — whatever you need
+    console.log('trace:', payload.traceId, payload.stepCount);
+  }
+};
+
+const kernel = new Kernel({ store, llm: myLLM, traceSink: myTraceSink });
+```
+
+### Replaying a trace
+
+Given a `traceId`, you can re-run the exact same LLM call and compare outputs:
+
+```typescript
+// The payload contains everything needed to reconstruct the call
+const payload: TracePayload = await yourStore.getTrace(traceId);
+
+const original = payload.llmResult.content;
+const replayed = await myLLM({
+  systemPrompt: payload.systemPrompt,
+  conversationHistory: payload.conversationHistory,
+  prompt: payload.prompt,
+});
+
+console.log('same?', original === replayed.content);
+```
+
+### Use cases
+
+- **Debugging** — reproduce any agent decision from production
+- **Regression testing** — lock a prompt + context, assert output doesn't change after model updates  
+- **Prompt auditing** — full audit trail of every LLM call
+- **A/B testing** — replay same trace against different models
