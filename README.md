@@ -102,3 +102,93 @@ console.log(result.content);
 - `write(filePath, content)` → 写入文件
 - `invokeTool(toolCall)` → 执行工具调用
 - `getSpecs()` → 获取可用工具规格列表
+
+
+---
+
+## Memory System
+
+kuafu provides a three-layer pluggable memory protocol that gives the Kernel long-term context beyond the current conversation window.
+
+### MemoryProvider Protocol
+
+```typescript
+interface MemoryProvider {
+  retrieve(query: string, options?: {
+    limit?: number;
+    sessionId?: string;
+    taskId?: string;
+    scope?: 'session' | 'global';
+  }): Promise<MemoryItem[]>;
+
+  store?(item: MemoryItem): Promise<void>;
+}
+
+interface MemoryItem {
+  id: string;
+  content: string;
+  score?: number;           // Relevance 0–1
+  source?: string;          // e.g. 'kuafu-facts', 'memox', 'sqlite-history'
+  purpose?: 'chat_history' | 'knowledge';
+  metadata?: Record<string, unknown>;
+}
+```
+
+- `purpose: 'chat_history'` → injected as multi-turn messages into the LLM
+- `purpose: 'knowledge'` (default) → injected as `<retrieved_memory>` block in system prompt
+
+### Built-in Providers (bridge)
+
+| Provider | Source | Mode |
+|---|---|---|
+| `BridgeMemoryProvider` | Bridge SQLite (`kuafu_facts` table + chat history) | read + write |
+| `MemoxMemoryProvider` | memox SQLite (host, read-only mount) | read-only |
+| `CompositeMemoryProvider` | Fan-out to all providers | aggregates |
+
+### kuafu_facts Table
+
+Long-term assistant responses scoped by `chat_id` + `thread_id`. Written by `BridgeMemoryProvider.store()` after each DONE.
+
+```sql
+CREATE TABLE kuafu_facts (
+  id TEXT PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  thread_id INTEGER DEFAULT 0,
+  task_id TEXT,
+  content TEXT NOT NULL,     -- LLM-extracted fact bullets or handoff summary
+  tags TEXT DEFAULT '',      -- 'extracted' | 'handoff'
+  importance INTEGER DEFAULT 3,  -- 1-5; 5 = handoff/critical
+  created_at INTEGER NOT NULL
+);
+```
+
+### kuafu_traces Table (Verifiable Tape)
+
+Records which memory items were actually injected into each Kernel run. Enables context provenance — debug why the agent responded a certain way.
+
+```sql
+CREATE TABLE kuafu_traces (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  session_id TEXT,
+  item_count INTEGER DEFAULT 0,
+  items TEXT NOT NULL DEFAULT '[]',  -- JSON: [{id, source, purpose, score, preview}]
+  created_at INTEGER NOT NULL
+);
+```
+
+Query traces:
+```sql
+SELECT task_id, item_count, items, datetime(created_at/1000,'unixepoch') as ts
+FROM kuafu_traces ORDER BY created_at DESC LIMIT 10;
+```
+
+### Context Budget
+
+`CompositeMemoryProvider` enforces a token budget (default 2000 tokens ≈ 8000 chars) after dedup + priority sort. Override via env:
+
+```bash
+KUAFU_CONTEXT_BUDGET_CHARS=12000
+```
+
+Priority order: handoff items (tags=handoff) → highest score → insertion order.

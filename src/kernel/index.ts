@@ -175,7 +175,8 @@ export class Kernel {
             source: 'kernel-output',
             purpose: 'knowledge',
             // Pass routing context so bridge-side store() can scope by chat/thread
-            metadata: { taskId, sessionId }
+            // isHandoff=true triggers a separate handoff-summary row in kuafu_facts
+            metadata: { taskId, sessionId, isHandoff: true }
           }).catch((err: unknown) => {
             console.warn('[Kernel] memory.store() failed:', err instanceof Error ? err.message : String(err));
           });
