@@ -1,6 +1,6 @@
 {
   "name": "@kuafu/framework",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Channel-agnostic Agent Runtime Framework",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,6 +26,14 @@
     "./telemetry": {
       "types": "./dist/telemetry.d.ts",
       "import": "./dist/telemetry.js"
+    },
+    "./llm-client": {
+      "types": "./dist/llm-client.d.ts",
+      "import": "./dist/llm-client.js"
+    },
+    "./routing-config": {
+      "types": "./dist/routing-config.d.ts",
+      "import": "./dist/routing-config.js"
     }
   },
   "repository": {

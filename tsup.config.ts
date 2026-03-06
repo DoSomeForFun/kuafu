@@ -1,12 +1,23 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: {
+    'index': 'src/index.ts',
+    'store': 'src/store.ts',
+    'kernel': 'src/kernel/index.ts',
+    'action': 'src/action.ts',
+    'telemetry': 'src/telemetry.ts',
+    'llm-client': 'src/llm-client.ts',
+    'routing-config': 'src/routing-config.ts',
+  },
+  outDir: 'dist',
+  // Flatten kernel/index.ts → dist/kernel.js to match package.json exports
+  outExtension: () => ({ js: '.js' }),
   format: ['esm'],
-  dts: false,  // 暂时禁用 DTS 生成，修复 TypeScript 缓存问题
+  dts: false,
   sourcemap: true,
   clean: true,
   minify: false,
   target: 'node20',
-  external: ['better-sqlite3', 'pino']
+  external: ['better-sqlite3', 'pino', 'sqlite-vec'],
 });
