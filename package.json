@@ -45,7 +45,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",
