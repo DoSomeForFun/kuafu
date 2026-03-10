@@ -96,7 +96,7 @@ export async function handleDeciding(context: KernelContext): Promise<KernelCont
 }
 
 /**
- * Handle ACTING state
+ * Handle ACTING state — executes all tool calls in parallel
  */
 export async function handleActing(
   context: KernelContext,
@@ -112,15 +112,52 @@ export async function handleActing(
       return { ...context, state: 'THINKING' };
     }
 
-    const toolResults = [];
-    let toolFailures = context.toolFailures;
-    for (const toolCall of turnResult.toolCalls) {
-      const result = await action.invokeTool(toolCall);
-      toolResults.push(result);
-      if (!result.ok) toolFailures++;
-    }
+    const toolCalls = turnResult.toolCalls;
+    const total = toolCalls.length;
+    const actingStart = Date.now();
 
-    span.end();
+    context.progressSink?.emit({
+      type: 'tool_parallel_start',
+      taskId: context.taskId,
+      sessionId: context.sessionId,
+      toolTotal: total,
+      step: context.stepCount,
+    });
+
+    const toolResults = await Promise.all(
+      toolCalls.map(async (toolCall: any, index: number) => {
+        const toolStart = Date.now();
+        context.progressSink?.emit({
+          type: 'tool_start',
+          taskId: context.taskId,
+          sessionId: context.sessionId,
+          toolName: toolCall.function?.name,
+          toolIndex: index,
+          toolTotal: total,
+          step: context.stepCount,
+        });
+
+        const result = await action.invokeTool(toolCall);
+
+        context.progressSink?.emit({
+          type: 'tool_end',
+          taskId: context.taskId,
+          sessionId: context.sessionId,
+          toolName: toolCall.function?.name,
+          toolIndex: index,
+          toolTotal: total,
+          ok: result.ok,
+          durationMs: Date.now() - toolStart,
+          step: context.stepCount,
+        });
+
+        return result;
+      })
+    );
+
+    const toolFailures = context.toolFailures + toolResults.filter((r: any) => !r.ok).length;
+
+    span.end({ toolTotal: total, durationMs: Date.now() - actingStart });
     return {
       ...context,
       toolFailures,
