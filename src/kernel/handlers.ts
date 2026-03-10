@@ -1,33 +1,70 @@
 import { telemetry } from '../telemetry.js';
 import type { KernelContext, LLMCallOptions, LLMCallResult } from './types.js';
 
+/** Max chars of a single retrieved item included in contextBlock */
+const MAX_ITEM_CHARS = 400;
+
 /**
- * Handle PERCEIVING state
+ * Handle PERCEIVING state — retrieve relevant context and build contextBlock
  */
 export async function handlePerceiving(context: KernelContext): Promise<KernelContext> {
   const span = telemetry.startSpan('Kernel.handlePerceiving');
-  
-  try {
-    const perceptionData = await context.perception.gather({
-      prompt: context.originalPrompt,
-      task: context.task,
-      retrievedContext: context.retrievedContext,
-      sessionId: context.sessionId,
-      taskId: context.taskId,
-      isSimpleChat: context.forceSimpleChat
-    });
 
-    span.end();
+  try {
+    let embedding = context.promptEmbedding;
+    let retrievedContext = context.retrievedContext ?? [];
+
+    // Generate embedding on demand if embedFn is available and not pre-supplied
+    if (!embedding && context.embedFn) {
+      try {
+        embedding = await context.embedFn(context.originalPrompt);
+      } catch {
+        // non-fatal — fall back to recency retrieval
+      }
+    }
+
+    // Vector or recency retrieval via store
+    if (context.store?.searchRelevant && (embedding || retrievedContext.length === 0)) {
+      try {
+        const hits = context.store.searchRelevant({
+          embedding: embedding ?? new Float32Array(0),
+          filterByTaskId: context.taskId,
+          limit: 6,
+        });
+        if (hits.length > 0) retrievedContext = hits;
+      } catch {
+        // non-fatal
+      }
+    }
+
+    // Build contextBlock from retrieved items
+    const contextBlock = buildContextBlock(retrievedContext);
+
+    span.end({ retrievedCount: retrievedContext.length });
     return {
       ...context,
-      sensoryData: perceptionData,
-      contextBlock: perceptionData.state?.contextBlock || '',
-      state: 'THINKING'
+      promptEmbedding: embedding,
+      retrievedContext,
+      contextBlock,
+      state: 'THINKING',
     };
   } catch (error: any) {
     span.end({ error: error.message });
     throw error;
   }
+}
+
+function buildContextBlock(items: any[]): string {
+  if (!items.length) return '';
+  const lines = items
+    .filter(item => item?.content)
+    .map(item => {
+      const sender = item.senderId || item.sender_id || 'unknown';
+      const text = String(item.content).slice(0, MAX_ITEM_CHARS);
+      return `[${sender}]: ${text}`;
+    });
+  if (!lines.length) return '';
+  return `## Relevant Context\n${lines.join('\n')}`;
 }
 
 /**
@@ -171,7 +208,7 @@ export async function handleActing(
 }
 
 /**
- * Handle REFLECTING state — evaluate tool results and persist to history
+ * Handle REFLECTING state — persist tool results, optionally save embedding for future recall
  */
 export async function handleReflecting(
   context: KernelContext,
@@ -192,14 +229,28 @@ export async function handleReflecting(
     }
     const reflectionContent = parts.join('\n---\n');
 
+    const messageId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await store.saveTaskMessage({
-      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: messageId,
       task_id: context.taskId,
       branch_id: context.currentBranchId,
       sender_id: context.agentName || 'agent',
       content: reflectionContent,
       payload: { toolResults }
     });
+
+    // Persist embedding for future semantic recall (non-blocking)
+    if (reflectionContent.trim() && context.embedFn && store.upsertVector) {
+      context.embedFn(reflectionContent).then(embedding => {
+        store.upsertVector({
+          messageId,
+          taskId: context.taskId,
+          senderId: context.agentName || 'agent',
+          content: reflectionContent,
+          embedding,
+        });
+      }).catch(() => { /* non-fatal */ });
+    }
 
     const allFailed = toolResults.length > 0 && toolResults.every((r: any) => !r.ok);
     

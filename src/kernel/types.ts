@@ -1,4 +1,10 @@
 /**
+ * Optional embedding function — inject to enable semantic memory recall.
+ * Converts text to a float vector (e.g. BGE-M3, OpenAI text-embedding-3).
+ */
+export type EmbedFn = (text: string) => Promise<number[]>;
+
+/**
  * Kernel FSM states
  */
 export type KernelState = 
@@ -26,6 +32,8 @@ export interface KernelRunOptions {
   maxHistory?: number;
   retrievedContext?: any[];
   promptEmbedding?: number[];
+  /** Optional embedding function for semantic memory recall */
+  embedFn?: EmbedFn;
   progressSink?: any;
   onStep?: (context: any) => void;
   isSimpleChat?: boolean;
@@ -48,8 +56,9 @@ export interface KernelContext {
   progressHeartbeatMs: number;
   
   // Components
+  store: any;
+  embedFn?: EmbedFn;
   decision?: any;
-  perception?: any;
   llmProvider?: LLMProvider;
   
   // Runtime State

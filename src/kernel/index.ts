@@ -1,7 +1,7 @@
 import { telemetry, runWithTrace } from '../telemetry.js';
 import { KernelFSM } from './fsm.js';
 import { handlePerceiving, handleThinking, handleDeciding, handleActing, handleReflecting } from './handlers.js';
-import type { KernelContext, KernelRunOptions, KernelRunResult, KernelState, LLMProvider, LLMCallOptions, LLMCallResult } from './types.js';
+import type { KernelContext, KernelRunOptions, KernelRunResult, KernelState, LLMProvider, LLMCallOptions, LLMCallResult, EmbedFn } from './types.js';
 
 /**
  * The Unified Kernel - Agent execution orchestrator
@@ -14,6 +14,7 @@ export class Kernel {
   private action: any;
   private llmProvider: LLMProvider;
   private progressSink: any;
+  private embedFn?: EmbedFn;
 
   constructor(options: {
     store?: any;
@@ -22,12 +23,14 @@ export class Kernel {
     llmProvider?: LLMProvider;
     workdir?: string;
     progressSink?: any;
+    embedFn?: EmbedFn;
     [key: string]: any;
   } = {}) {
     this.store = options.store || options.backend;
     this.action = options.action || null;
     this.llmProvider = options.llmProvider || new StubLLMProvider();
     this.progressSink = options.progressSink || null;
+    this.embedFn = options.embedFn;
   }
 
   /**
@@ -44,11 +47,13 @@ export class Kernel {
       maxHistory = 10,
       progressSink,
       isSimpleChat: forceSimpleChat,
-      promptEmbedding
+      promptEmbedding,
+      embedFn: runEmbedFn,
     } = options;
 
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
     const resolvedProgressSink = progressSink || this.progressSink;
+    const resolvedEmbedFn = runEmbedFn || this.embedFn;
 
     return runWithTrace(traceId, async () => {
       const span = telemetry.startSpan('Kernel.run');
@@ -72,6 +77,8 @@ export class Kernel {
           turnHint: null,
           isWorkspaceReady: false,
           forceSimpleChat, promptEmbedding,
+          store: this.store,
+          embedFn: resolvedEmbedFn,
           task, currentBranchId, retrievedContext,
           sensoryData: null, contextBlock: '',
           turnResult: null, advice: null, finalResult: null,

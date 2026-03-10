@@ -30,10 +30,22 @@ function containsSensitiveContent(content: string | undefined | null): boolean {
 }
 
 /**
+ * A retrieved context item from vector or recency search
+ */
+export interface SearchResult {
+  id: string;
+  taskId: string;
+  senderId: string;
+  content: string;
+  score: number;
+}
+
+/**
  * Unified Store (SQLite + Vector)
  */
 export class Store {
   public db: Database.Database;
+  private vecAvailable: boolean = false;
 
   constructor(dbPath: string = 'data/agent-tasks.sqlite') {
     if (dbPath !== ':memory:') {
@@ -49,8 +61,9 @@ export class Store {
 
     try {
       loadSqliteVec(this.db);
-    } catch (err) {
-      console.warn('[Store] sqlite-vec load failed:', (err as Error).message);
+      this.vecAvailable = true;
+    } catch {
+      // sqlite-vec unavailable — searchRelevant falls back to recency
     }
 
     this._initSchema();
@@ -133,11 +146,12 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS context_vectors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id TEXT,
+        message_id TEXT UNIQUE,
         task_id TEXT,
         sender_id TEXT,
         content TEXT,
-        embedding BLOB
+        embedding BLOB,
+        created_at INTEGER
       );
     `);
 
@@ -339,6 +353,110 @@ export class Store {
     const stmt = this.db.prepare('UPDATE tasks SET current_branch_id = ?, updated_at = ? WHERE id = ?');
     stmt.run(branchId, Date.now(), taskId);
     return branchId;
+  }
+
+  /**
+   * Store an embedding vector for a message.
+   * Uses INSERT OR REPLACE so repeated calls are idempotent.
+   */
+  upsertVector(input: {
+    messageId: string;
+    taskId: string;
+    senderId: string;
+    content: string;
+    embedding: number[] | Float32Array;
+  }): void {
+    const buf = Buffer.from(
+      input.embedding instanceof Float32Array
+        ? input.embedding.buffer
+        : new Float32Array(input.embedding).buffer
+    );
+    this.db.prepare(`
+      INSERT INTO context_vectors (message_id, task_id, sender_id, content, embedding, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(message_id) DO UPDATE SET
+        content   = excluded.content,
+        embedding = excluded.embedding
+    `).run(input.messageId, input.taskId, input.senderId, input.content, buf, Date.now());
+  }
+
+  /**
+   * Retrieve semantically relevant context for a task.
+   *
+   * When sqlite-vec is available uses cosine distance on stored embeddings.
+   * Falls back to recency ordering when the extension is absent or query fails.
+   *
+   * filterByTaskId   — exact task match (default)
+   * filterByTaskIdPrefix — prefix match for "conversation scope"
+   * senderWeightMap  — multiply score by weight for matching sender prefix
+   */
+  searchRelevant(input: {
+    embedding: number[] | Float32Array;
+    filterByTaskId?: string;
+    filterByTaskIdPrefix?: string;
+    limit?: number;
+    senderWeightMap?: Record<string, number>;
+  }): SearchResult[] {
+    const limit = input.limit ?? 5;
+
+    if (this.vecAvailable) {
+      try {
+        const buf = Buffer.from(
+          input.embedding instanceof Float32Array
+            ? input.embedding.buffer
+            : new Float32Array(input.embedding).buffer
+        );
+
+        let rows: any[];
+        if (input.filterByTaskIdPrefix) {
+          rows = this.db.prepare(`
+            SELECT message_id AS id, task_id AS taskId, sender_id AS senderId, content,
+                   vec_distance_cosine(embedding, ?) AS score
+            FROM context_vectors
+            WHERE task_id LIKE ? AND embedding IS NOT NULL
+            ORDER BY score ASC
+            LIMIT ?
+          `).all(buf, `${input.filterByTaskIdPrefix}%`, limit);
+        } else {
+          rows = this.db.prepare(`
+            SELECT message_id AS id, task_id AS taskId, sender_id AS senderId, content,
+                   vec_distance_cosine(embedding, ?) AS score
+            FROM context_vectors
+            WHERE task_id = ? AND embedding IS NOT NULL
+            ORDER BY score ASC
+            LIMIT ?
+          `).all(buf, input.filterByTaskId ?? '', limit);
+        }
+
+        return this._applyWeights(rows, input.senderWeightMap);
+      } catch {
+        // fall through to recency fallback
+      }
+    }
+
+    // Recency fallback
+    const rows = this.db.prepare(`
+      SELECT message_id AS id, task_id AS taskId, sender_id AS senderId, content, 0.5 AS score
+      FROM context_vectors
+      WHERE task_id = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(input.filterByTaskId ?? '', limit) as SearchResult[];
+
+    return rows;
+  }
+
+  private _applyWeights(rows: any[], senderWeightMap?: Record<string, number>): SearchResult[] {
+    if (!senderWeightMap) return rows as SearchResult[];
+    return (rows as SearchResult[])
+      .map(row => {
+        let weight = 1.0;
+        for (const [prefix, w] of Object.entries(senderWeightMap)) {
+          if (row.senderId?.startsWith(prefix)) { weight = w; break; }
+        }
+        return { ...row, score: row.score * weight };
+      })
+      .sort((a, b) => a.score - b.score);
   }
 
   /**
