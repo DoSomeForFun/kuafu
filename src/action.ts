@@ -13,7 +13,7 @@ export interface ToolCall {
   type: 'function';
   function: {
     name: string;
-    arguments: Record<string, unknown>;
+    arguments: Record<string, any>;
   };
 }
 
@@ -42,7 +42,7 @@ export interface ToolSpec {
     description: string;
     parameters: {
       type: 'object';
-      properties: Record<string, unknown>;
+      properties: Record<string, any>;
       required: string[];
       additionalProperties: boolean;
     };
@@ -76,16 +76,16 @@ export class Action {
     this.cwd = options.cwd || this.projectRoot;
     this.sandboxPath = null;
     this.timeoutMs = options.timeoutMs ?? (this._getEnvInt('KUAFU_TOOL_TIMEOUT_MS', 120000) || this._getEnvInt('AGENT_TOOL_TIMEOUT_MS', 120000));
-    this.bashRetryMax = this._toSafeInt(options.bashRetryMax ?? this._getEnvInt('TELEGRAM_BASH_RETRY_MAX', 1));
-    this.bashRetryBaseDelayMs = this._toSafeInt(options.bashRetryBaseDelayMs ?? this._getEnvInt('TELEGRAM_BASH_RETRY_BASE_DELAY_MS', 800));
-    this.bashRetryMaxDelayMs = this._toSafeInt(options.bashRetryMaxDelayMs ?? this._getEnvInt('TELEGRAM_BASH_RETRY_MAX_DELAY_MS', 4000));
+    this.bashRetryMax = this._toSafeInt(options.bashRetryMax ?? this._getEnvInt('TELEGRAM_BASH_RETRY_MAX', 1), 1);
+    this.bashRetryBaseDelayMs = this._toSafeInt(options.bashRetryBaseDelayMs ?? this._getEnvInt('TELEGRAM_BASH_RETRY_BASE_DELAY_MS', 800), 800);
+    this.bashRetryMaxDelayMs = this._toSafeInt(options.bashRetryMaxDelayMs ?? this._getEnvInt('TELEGRAM_BASH_RETRY_MAX_DELAY_MS', 4000), 4000);
   }
 
   /**
    * Convert to safe integer
    */
-  private _toSafeInt(value: unknown, defaultValue: number = 0): number {
-    const num = parseInt(String(value), 10);
+  private _toSafeInt(value: any, defaultValue: number): number {
+    const num = parseInt(value, 10);
     return Number.isFinite(num) && num > 0 ? num : defaultValue;
   }
 
@@ -174,15 +174,14 @@ export class Action {
           exhausted: false
         }
       };
-    } catch (error: unknown) {
-      const err = error as { code?: string; killed?: boolean; message?: string; stderr?: string };
+    } catch (error: any) {
       const duration = Date.now() - startTime;
-      const isTimeout = err.code === 'ETIMEDOUT' || err.killed;
+      const isTimeout = error.code === 'ETIMEDOUT' || error.killed;
       
       return {
         ok: false,
-        error: err.message || String(error),
-        stderr: err.stderr,
+        error: error.message || String(error),
+        stderr: error.stderr,
         retryInfo: {
           retried: 0,
           attempts: 1,
@@ -212,11 +211,10 @@ export class Action {
         ok: true,
         stdout: content
       };
-    } catch (error: unknown) {
-      const err = error as { message?: string };
+    } catch (error: any) {
       return {
         ok: false,
-        error: err.message || String(error)
+        error: error.message || String(error)
       };
     }
   }
@@ -239,21 +237,12 @@ export class Action {
         ok: true,
         stdout: `File written: ${filePath}`
       };
-    } catch (error: unknown) {
-      const err = error as { message?: string };
+    } catch (error: any) {
       return {
         ok: false,
-        error: err.message || String(error)
+        error: error.message || String(error)
       };
     }
-  }
-
-  /**
-   * Read string arg from tool call payload.
-   */
-  private _getStringArg(args: Record<string, unknown>, key: string): string | null {
-    const value = args[key];
-    return typeof value === 'string' ? value : null;
   }
 
   /**
@@ -263,28 +252,12 @@ export class Action {
     const { name, arguments: args } = toolCall.function;
 
     switch (name) {
-      case 'bash': {
-        const command = this._getStringArg(args, 'command');
-        if (!command) {
-          return { ok: false, error: 'Invalid arguments for bash: command must be a string' };
-        }
-        return await this.bash(command);
-      }
-      case 'read': {
-        const filePath = this._getStringArg(args, 'path');
-        if (!filePath) {
-          return { ok: false, error: 'Invalid arguments for read: path must be a string' };
-        }
-        return await this.read(filePath);
-      }
-      case 'write': {
-        const filePath = this._getStringArg(args, 'path');
-        const content = this._getStringArg(args, 'content');
-        if (!filePath || content === null) {
-          return { ok: false, error: 'Invalid arguments for write: path/content must be strings' };
-        }
-        return await this.write(filePath, content);
-      }
+      case 'bash':
+        return await this.bash(args.command);
+      case 'read':
+        return await this.read(args.path);
+      case 'write':
+        return await this.write(args.path, args.content);
       default:
         return {
           ok: false,

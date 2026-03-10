@@ -31,6 +31,19 @@ export class KernelFSM {
         telemetry.debug(`[FSM] State: ${this.context.state}`);
         
         try {
+          // Increment turnCount when entering THINKING (one LLM round = one turn)
+          if (this.context.state === 'THINKING') {
+            this.context.turnCount++;
+            if (this.context.turnCount > this.context.maxTurns) {
+              this.context.state = 'DONE';
+              this.context.finalResult = {
+                content: this.context.finalResult?.content || '',
+                stopReason: 'max_turns_exceeded'
+              };
+              break;
+            }
+          }
+
           switch (this.context.state) {
             case 'PERCEIVING':
               this.context = await handlers.handlePerceiving(this.context);
@@ -61,7 +74,7 @@ export class KernelFSM {
             this.context.onStep(this.context);
           }
           
-          // Increment step count
+          // Increment state transition count
           this.context.stepCount++;
           
         } catch (error: any) {

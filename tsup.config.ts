@@ -7,11 +7,8 @@ export default defineConfig({
     'kernel': 'src/kernel/index.ts',
     'action': 'src/action.ts',
     'telemetry': 'src/telemetry.ts',
-    'llm-client': 'src/llm-client.ts',
-    'routing-config': 'src/routing-config.ts',
   },
   outDir: 'dist',
-  // Flatten kernel/index.ts → dist/kernel.js to match package.json exports
   outExtension: () => ({ js: '.js' }),
   format: ['esm'],
   dts: false,

@@ -1,22 +1,7 @@
-import type { ToolCall, ToolResult, ToolSpec } from '../action.js';
-import type {
-  IAction,
-  ContextBlock,
-  IDecision,
-  IDecisionResult,
-  IPerception,
-  IPerceptionOutput,
-  IProgressSink,
-  IStore,
-  OutcomeSink,
-  Task,
-  TraceSink
-} from '../types.js';
-
 /**
  * Kernel FSM states
  */
-export type KernelState =
+export type KernelState = 
   | 'PERCEIVING'
   | 'THINKING'
   | 'DECIDING'
@@ -24,88 +9,6 @@ export type KernelState =
   | 'REFLECTING'
   | 'DONE'
   | 'FAILED';
-
-/**
- * A single item retrieved from memory.
- */
-export interface MemoryItem {
-  id: string;
-  content: string;
-  /** Relevance score 0–1; higher = more relevant */
-  score?: number;
-  /** Where this memory came from, e.g. 'sqlite', 'memox', 'im-history', 'sop' */
-  source?: string;
-  /**
-   * How the Kernel should use this item:
-   * - 'chat_history': inject as multi-turn messages into the LLM (conversationHistory[])
-   * - 'knowledge': inject as a context block in the system prompt (<retrieved_memory>)
-   * Defaults to 'knowledge' if omitted.
-   */
-  purpose?: 'chat_history' | 'knowledge';
-  metadata?: Record<string, unknown>;
-}
-
-/**
- * Protocol for pluggable memory backends.
- * kuafu-framework defines this interface; implementations live outside the framework
- * (bridge, memox adapter, vector store, etc.).
- *
- * [Context Anchor]
- * - Intent: Decouple long-term / semantic memory from the FSM core.
- * - Constraints: Must not hard-depend on any specific storage system (memox, sqlite, etc.).
- * - Invariants: retrieve() is always read-only and non-blocking from the FSM perspective.
- * - Failure Modes: If retrieve() throws, PERCEIVING logs a warning and continues with empty memory.
- */
-export interface MemoryProvider {
-  /**
-   * Retrieve relevant memory items for the given query/prompt.
-   */
-  retrieve(query: string, options?: {
-    limit?: number;
-    sessionId?: string;
-    taskId?: string;
-    scope?: 'session' | 'global';
-  }): Promise<MemoryItem[]>;
-
-  /**
-   * Optionally persist a memory item after a run completes.
-   * Called with the final assistant response so implementations can update long-term memory.
-   */
-  store?(item: MemoryItem): Promise<void>;
-}
-
-/**
- * Kernel constructor dependencies
- */
-export interface KernelDependencies {
-  store?: IStore;
-  /** @deprecated Use `store` instead. */
-  backend?: IStore;
-  action?: IAction;
-  perception?: IPerception;
-  decision?: IDecision;
-  memory?: MemoryProvider;
-  workdir?: string;
-  progressSink?: IProgressSink;
-  outcomeSink?: OutcomeSink;
-  /** Callback invoked after each tool call in ACTING state for execution provenance. */
-  actionSink?: (record: ToolActionRecord) => void;
-  /** Trace sink — kernel-side callback for Deterministic Context Assembly.
-   * Emitted after each LLM call in THINKING state. */
-  traceSink?: TraceSink;
-  /** Inject a real LLM backend. Called for every THINKING step. */
-  llm?: LLMFunction;
-  /**
-   * Max LLM retry attempts on transient failures (network errors, 5xx).
-   * Retries use exponential backoff: 500ms, 1000ms, 2000ms...
-   * @default 2
-   */
-  maxRetries?: number;
-  [key: string]: unknown;
-}
-
-/** LLM function signature for constructor injection */
-export type LLMFunction = (options: LLMCallOptions) => Promise<LLMCallResult>;
 
 /**
  * Kernel run options
@@ -116,24 +19,16 @@ export interface KernelRunOptions {
   sessionId: string;
   contextScope?: 'isolated' | 'linked' | 'conversation';
   agentName?: string;
+  /** Max agent turns (THINKING→DECIDING→ACTING→REFLECTING = 1 turn) */
+  maxTurns?: number;
+  /** @deprecated Use maxTurns instead */
   maxSteps?: number;
   maxHistory?: number;
-  retrievedContext?: unknown[];
+  retrievedContext?: any[];
   promptEmbedding?: number[];
-  progressSink?: IProgressSink;
-  outcomeSink?: OutcomeSink;
+  progressSink?: any;
+  onStep?: (context: any) => void;
   isSimpleChat?: boolean;
-  onStep?: (context: KernelContext) => void;
-  /** Hint for OutcomeSink: who triggered this run */
-  trigger?: 'user' | 'autonomous' | 'unknown';
-  /** Extra metadata passed through to OutcomeSink.onOutcome() */
-  outcomeMeta?: Record<string, unknown>;
-}
-
-export interface KernelFinalResult {
-  content?: string;
-  stopReason?: string;
-  error?: string;
 }
 
 /**
@@ -144,51 +39,44 @@ export interface KernelContext {
   taskId: string;
   sessionId: string;
   originalPrompt: string;
+  /** @deprecated Kept for backward compat; use maxTurns */
   maxSteps: number;
   maxHistory: number;
   agentName?: string;
-  onStep?: (context: KernelContext) => void;
-  progressSink: IProgressSink | null;
+  onStep?: (context: any) => void;
+  progressSink: any;
   progressHeartbeatMs: number;
-
+  
   // Components
-  decision: IDecision;
-  perception: IPerception;
-
+  decision?: any;
+  perception?: any;
+  llmProvider?: LLMProvider;
+  
   // Runtime State
   state: KernelState;
   stepCount: number;
+  turnCount: number;
+  maxTurns: number;
   turnHint: string | null;
   isWorkspaceReady: boolean;
   forceSimpleChat?: boolean;
   promptEmbedding?: number[];
-
+  
   // Data
-  task: Task;
+  task: any;
   currentBranchId: string;
-  retrievedContext: unknown[];
-  /** Memory items fetched during PERCEIVING via MemoryProvider.retrieve() */
-  retrievedMemory: MemoryItem[];
-  /**
-   * Structured conversation history built from retrievedMemory (source='sqlite-history').
-   * Injected as multi-turn messages into the LLM in THINKING state.
-   */
-  conversationHistory: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
-  sensoryData: IPerceptionOutput | null;
+  retrievedContext: any[];
+  sensoryData: any | null;
   contextBlock: string;
-  contextBlocks: ContextBlock[] | null;
-  turnResult: LLMCallResult | null;
-  advice: IDecisionResult | null;
-  finalResult: KernelFinalResult | null;
-  /** Structured evidence from the last ACTING step's failed tool calls.
-   *  Fed back into the next THINKING prompt so the LLM knows what failed and why. */
-  lastToolEvidence: ToolEvidence[] | null;
-
+  turnResult: any | null;
+  advice: any | null;
+  finalResult: any | null;
+  
   // Flags
   isReroute: boolean;
-
+  
   // Metrics
-  journal?: Record<string, unknown>;
+  journal?: any;
   toolsUsed: string[];
   toolFailures: number;
   totalPromptTokens: number;
@@ -219,11 +107,6 @@ export interface KernelRunResult {
       recipeHit: boolean;
       sessionKey: string;
     };
-    /**
-     * Memory items that were retrieved and injected into the LLM context during PERCEIVING.
-     * Enables context provenance tracing (Verifiable Tape pattern).
-     */
-    retrievedMemory?: MemoryItem[];
   };
 }
 
@@ -233,16 +116,8 @@ export interface KernelRunResult {
 export interface LLMCallOptions {
   prompt: string;
   systemPrompt?: string;
-  history?: unknown[];
-  /**
-   * Structured multi-turn conversation history for LLMs that support it.
-   * When provided, the LLM implementation should use this as the messages array
-   * instead of building one from prompt alone.
-   * Format: [{role: 'user'|'assistant'|'system', content: string}, ...]
-   * The current user turn (prompt) is appended automatically by the LLM implementation.
-   */
-  conversationHistory?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
-  tools?: ToolSpec[];
+  history?: Array<{ role: string; content: string }>;
+  tools?: any[];
   model?: string;
   temperature?: number;
   maxTokens?: number;
@@ -254,16 +129,20 @@ export interface LLMCallOptions {
  */
 export interface LLMCallResult {
   content: string;
-  /** Model used for this LLM call */
-  model?: string;
   thinking?: string;
-  toolCalls?: ToolCall[];
-  toolResults?: ToolResult[];
+  toolCalls?: any[];
   usage?: {
     promptTokens: number;
     completionTokens: number;
   };
-  latencyMs?: number;
+  latencyMs: number;
+}
+
+/**
+ * LLM Provider interface — inject to make Kernel functional
+ */
+export interface LLMProvider {
+  chat(options: LLMCallOptions): Promise<LLMCallResult>;
 }
 
 /**
@@ -271,37 +150,7 @@ export interface LLMCallResult {
  */
 export interface ToolExecutionResult {
   ok: boolean;
-  results: ToolResult[];
+  results: any[];
   error?: string;
   durationMs: number;
-}
-
-/**
- * Structured evidence of a single failed tool call.
- * Carried through KernelContext.lastToolEvidence into the next THINKING step,
- * so the LLM knows what it tried, what failed, and why.
- */
-export interface ToolEvidence {
-  toolName: string;
-  /** Note: arguments intentionally excluded to prevent sensitive data leakage into LLM prompts. */
-  error: string;
-  stdout?: string;
-  stderr?: string;
-}
-
-/**
- * Tool execution provenance record — emitted via actionSink after each tool call in ACTING state.
- * [Context Anchor]
- * - Intent: Verifiable Tape for tool executions (bub pattern) — record what the agent actually did.
- * - Invariants: Always emitted after invokeTool returns, never blocks the main FSM flow.
- */
-export interface ToolActionRecord {
-  id: string;
-  taskId: string;
-  sessionId: string;
-  toolName: string;
-  toolArgs: Record<string, unknown>;
-  toolResult: { ok: boolean; stdout?: string; stderr?: string; error?: string; output?: unknown };
-  durationMs: number;
-  createdAt: number;
 }

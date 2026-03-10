@@ -1,25 +1,9 @@
 import Database from 'better-sqlite3';
+import { load as loadSqliteVec } from 'sqlite-vec';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
-import type { IStore, Message, SaveTaskMessageInput, Task, TaskStatus } from './types.js';
-
-// sqlite-vec is optional — RAG vector features are disabled if it fails to load.
-let sqliteVecLoad: ((db: Database.Database) => void) | null = null;
-try {
-  const sqliteVec = await import('sqlite-vec');
-  sqliteVecLoad = sqliteVec.load;
-} catch {
-  // sqlite-vec not available in this environment — vector features disabled
-}
-
-// vec0 virtual table shadow-table suffixes (used to purge stale state during migration)
-const VEC0_SHADOW_SUFFIXES = [
-  '_chunks', '_rowids', '_info',
-  '_metadatachunks00', '_metadatachunks01', '_metadatachunks02', '_metadatachunks03', '_metadatachunks04',
-  '_metadatatext00', '_metadatatext01', '_metadatatext02', '_metadatatext03', '_metadatatext04',
-  '_vector_chunks00',
-];
+import type { Task, Message, TaskStatus } from './types.js';
 
 /**
  * Sensitive content patterns for filtering
@@ -48,7 +32,7 @@ function containsSensitiveContent(content: string | undefined | null): boolean {
 /**
  * Unified Store (SQLite + Vector)
  */
-export class Store implements IStore {
+export class Store {
   public db: Database.Database;
 
   constructor(dbPath: string = 'data/agent-tasks.sqlite') {
@@ -60,19 +44,14 @@ export class Store implements IStore {
     }
     
     this.db = new Database(dbPath);
-
-    // Load sqlite-vec extension for vector search (optional — graceful degradation)
-    if (sqliteVecLoad) {
-      try {
-        sqliteVecLoad(this.db);
-      } catch (err: any) {
-        console.warn('[Store] sqlite-vec load failed:', err?.message || err);
-        sqliteVecLoad = null; // disable for this instance
-      }
-    }
-
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+
+    try {
+      loadSqliteVec(this.db);
+    } catch (err) {
+      console.warn('[Store] sqlite-vec load failed:', (err as Error).message);
+    }
 
     this._initSchema();
   }
@@ -152,6 +131,14 @@ export class Store implements IStore {
         payload TEXT,
         created_at INTEGER
       );
+      CREATE TABLE IF NOT EXISTS context_vectors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT,
+        task_id TEXT,
+        sender_id TEXT,
+        content TEXT,
+        embedding BLOB
+      );
     `);
 
     // Create indexes
@@ -162,98 +149,8 @@ export class Store implements IStore {
       CREATE INDEX IF NOT EXISTS idx_llm_executions_task ON llm_executions(task_id);
       CREATE INDEX IF NOT EXISTS idx_runs_chat ON runs(chat_id);
       CREATE INDEX IF NOT EXISTS idx_runs_sender ON runs(sender_id);
+      CREATE INDEX IF NOT EXISTS idx_context_vectors_task ON context_vectors(task_id);
     `);
-
-    // Apply incremental migrations for older databases
-    this._applyMigrations();
-
-    // Set up vec0 virtual tables for vector search (requires sqlite-vec)
-    if (sqliteVecLoad) {
-      this._initVecTables();
-    }
-  }
-
-  private _applyMigrations(): void {
-    const lessonsInfo = this.db.prepare('PRAGMA table_info(lessons)').all() as { name: string }[];
-    if (!lessonsInfo.some(col => col.name === 'trajectory')) {
-      this.db.exec('ALTER TABLE lessons ADD COLUMN trajectory TEXT;');
-    }
-
-    const tasksInfo = this.db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
-    if (!tasksInfo.some(col => col.name === 'current_branch_id')) {
-      this.db.exec('ALTER TABLE tasks ADD COLUMN current_branch_id TEXT;');
-    }
-
-    const messagesInfo = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
-    if (!messagesInfo.some(col => col.name === 'branch_id')) {
-      this.db.exec('ALTER TABLE messages ADD COLUMN branch_id TEXT;');
-    }
-    if (!messagesInfo.some(col => col.name === 'is_archived')) {
-      this.db.exec('ALTER TABLE messages ADD COLUMN is_archived INTEGER DEFAULT 0;');
-    }
-  }
-
-  /**
-   * [Context Anchor]
-   * - Intent: Create / migrate vec0 virtual tables for semantic vector search.
-   * - Constraints: vec0 uses internal shadow tables (_chunks, _rowids, etc.). If a regular
-   *   `context_vectors` table exists from an older schema, a `DROP TABLE` alone is not enough —
-   *   stale shadow tables cause `CREATE VIRTUAL TABLE IF NOT EXISTS` to silently no-op, leaving
-   *   the virtual table in a corrupt / inconsistent state.
-   * - Invariants: After this method returns, `context_vectors` MUST be a valid vec0 virtual table
-   *   OR the entire vec0 setup must have been skipped (sqliteVecLoad = null).
-   * - Failure Modes: Any error here is caught and logged; RAG features degrade gracefully.
-   */
-  private _initVecTables(): void {
-    try {
-      const VEC0_DDL = `
-        CREATE VIRTUAL TABLE IF NOT EXISTS context_vectors USING vec0(
-          message_id TEXT, task_id TEXT, sender_id TEXT, content TEXT,
-          embedding FLOAT[384], created_at TEXT
-        );
-      `;
-
-      // Determine the current state of the `context_vectors` table
-      const existing = this.db.prepare(
-        `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'context_vectors'`
-      ).get() as { sql: string } | undefined;
-
-      const isVirtualVec0 = existing?.sql?.toUpperCase().includes('USING VEC0') ?? false;
-      const isRegularTable = existing !== undefined && !isVirtualVec0;
-
-      if (isRegularTable) {
-        // Old regular table — drop it AND all stale shadow tables so that the subsequent
-        // CREATE VIRTUAL TABLE is not silently skipped due to leftover shadow state.
-        this.db.exec('DROP TABLE IF EXISTS context_vectors');
-        for (const suffix of VEC0_SHADOW_SUFFIXES) {
-          this.db.exec(`DROP TABLE IF EXISTS context_vectors${suffix}`);
-        }
-      } else if (isVirtualVec0) {
-        // Already a vec0 virtual table — verify it is readable; if corrupt, rebuild.
-        try {
-          this.db.prepare('SELECT count(*) FROM context_vectors').get();
-        } catch {
-          // Corrupt vec0 state — drop the virtual table (which cascades to shadow tables)
-          // and re-create from scratch.
-          this.db.exec('DROP TABLE IF EXISTS context_vectors');
-          for (const suffix of VEC0_SHADOW_SUFFIXES) {
-            this.db.exec(`DROP TABLE IF EXISTS context_vectors${suffix}`);
-          }
-        }
-      }
-
-      this.db.exec(VEC0_DDL);
-
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS lesson_vectors USING vec0(
-          lesson_id TEXT, prompt TEXT,
-          embedding FLOAT[384]
-        );
-      `);
-    } catch (err: any) {
-      console.warn('[Store] vec0 table init failed — vector search disabled:', err?.message || err);
-      sqliteVecLoad = null;
-    }
   }
 
   /**
@@ -280,15 +177,7 @@ export class Store implements IStore {
    */
   async getTaskById(taskId: string): Promise<Task | null> {
     const stmt = this.db.prepare('SELECT * FROM tasks WHERE id = ?');
-    const row = stmt.get(taskId) as {
-      id: string;
-      title: string;
-      date: string;
-      status: string;
-      notes: string | null;
-      current_branch_id: string | null;
-      updated_at: number | null;
-    } | undefined;
+    const row = stmt.get(taskId) as any;
     
     if (!row) return null;
     
@@ -297,9 +186,9 @@ export class Store implements IStore {
       title: row.title,
       date: row.date,
       status: row.status as TaskStatus,
-      notes: row.notes ?? undefined,
-      current_branch_id: row.current_branch_id ?? undefined,
-      updated_at: row.updated_at ?? undefined
+      notes: row.notes,
+      current_branch_id: row.current_branch_id,
+      updated_at: row.updated_at
     };
   }
 
@@ -315,21 +204,17 @@ export class Store implements IStore {
   }
 
   /**
-   * Create and switch to a new task branch.
-   */
-  async pivotBranch(taskId: string): Promise<string> {
-    const branchId = randomUUID();
-    const stmt = this.db.prepare(`
-      UPDATE tasks SET current_branch_id = ?, updated_at = ? WHERE id = ?
-    `);
-    stmt.run(branchId, Date.now(), taskId);
-    return branchId;
-  }
-
-  /**
    * Save task message
    */
-  async saveTaskMessage(message: SaveTaskMessageInput): Promise<void> {
+  async saveTaskMessage(message: {
+    id: string;
+    task_id: string;
+    branch_id: string;
+    sender_id: string;
+    content: string;
+    payload?: any;
+    execution_id?: string;
+  }): Promise<void> {
     const stmt = this.db.prepare(`
       INSERT INTO messages (id, task_id, branch_id, execution_id, sender_id, content, payload, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -352,7 +237,7 @@ export class Store implements IStore {
    */
   async getMessagesForTask(taskId: string, branchId?: string): Promise<Message[]> {
     let sql = 'SELECT * FROM messages WHERE task_id = ? AND is_archived = 0';
-    const params: unknown[] = [taskId];
+    const params: any[] = [taskId];
     
     if (branchId) {
       sql += ' AND branch_id = ?';
@@ -362,36 +247,19 @@ export class Store implements IStore {
     sql += ' ORDER BY created_at ASC';
     
     const stmt = this.db.prepare(sql);
-    const rows = stmt.all(...params) as Array<{
-      id: string;
-      task_id: string;
-      branch_id: string;
-      execution_id: string | null;
-      sender_id: string;
-      content: string;
-      payload: string | null;
-      is_archived: number;
-      created_at: number;
-    }>;
+    const rows = stmt.all(...params) as any[];
     
     return rows.map(row => ({
       id: row.id,
       task_id: row.task_id,
       branch_id: row.branch_id,
-      execution_id: row.execution_id ?? undefined,
+      execution_id: row.execution_id,
       sender_id: row.sender_id,
       content: row.content,
-      payload: row.payload ?? undefined,
+      payload: row.payload,
       is_archived: row.is_archived,
       created_at: row.created_at
     }));
-  }
-
-  /**
-   * Get active messages for task+branch.
-   */
-  async getActiveMessages(taskId: string, branchId: string): Promise<Message[]> {
-    return this.getMessagesForTask(taskId, branchId);
   }
 
   /**
@@ -457,113 +325,20 @@ export class Store implements IStore {
   }
 
   /**
-   * Upsert a vector embedding for semantic search.
-   * No-op if sqlite-vec is not loaded or content is too short / sensitive.
+   * Get active (non-archived) messages for a task/branch
    */
-  async upsertVector(input: {
-    messageId: string;
-    taskId: string;
-    senderId: string;
-    content: string;
-    embedding: number[];
-    createdAt?: number;
-  }): Promise<void> {
-    if (!sqliteVecLoad) return;
-    const { messageId, taskId, senderId, content, embedding, createdAt } = input;
-    if (!embedding?.length) return;
-    if (!content || content.length < 3) return;
-    if (containsSensitiveContent(content)) return;
-
-    const timestamp = createdAt && createdAt > 0 ? String(createdAt) : String(Date.now());
-    try {
-      this.db.prepare('DELETE FROM context_vectors WHERE message_id = ?').run(messageId);
-      this.db.prepare(`
-        INSERT INTO context_vectors(message_id, task_id, sender_id, content, embedding, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(messageId, taskId, senderId, content, JSON.stringify(embedding), timestamp);
-    } catch (err: any) {
-      throw new Error(`vectors persist failed: ${err?.message || err}`);
-    }
+  async getActiveMessages(taskId: string, branchId?: string): Promise<Message[]> {
+    return this.getMessagesForTask(taskId, branchId);
   }
 
   /**
-   * Search for semantically relevant messages using KNN on vec0.
-   * Returns an empty array if sqlite-vec is not loaded.
+   * Get or create a branch for a task, returning branchId
    */
-  async searchRelevant(input: {
-    embedding: number[];
-    limit?: number;
-    filterByTaskId?: string;
-    filterByTaskIds?: string[];
-    filterByTaskIdPrefix?: string;
-    timeDecayDays?: number;
-    minContentLength?: number;
-    senderWeightMap?: Record<string, number>;
-  }): Promise<Array<{ id: string; taskId: string; senderId: string; content: string; score: number }>> {
-    if (!sqliteVecLoad) return [];
-    const {
-      embedding,
-      limit = 5,
-      filterByTaskId,
-      filterByTaskIds,
-      filterByTaskIdPrefix,
-      timeDecayDays = 30,
-      minContentLength = 3,
-      senderWeightMap = {},
-    } = input;
-    if (!embedding?.length) return [];
-
-    const fetchLimit = Math.max(limit * 3, 20);
-    let sql = `
-      SELECT message_id, task_id, sender_id, content, distance, created_at
-      FROM context_vectors
-      WHERE embedding MATCH ? AND k = ?
-    `;
-    const params: unknown[] = [JSON.stringify(embedding), fetchLimit];
-
-    if (filterByTaskId) { sql += ' AND task_id = ?'; params.push(filterByTaskId); }
-    if (filterByTaskIds?.length) {
-      sql += ` AND task_id IN (${filterByTaskIds.map(() => '?').join(', ')})`;
-      params.push(...filterByTaskIds);
-    }
-    sql += ' ORDER BY distance ASC';
-
-    let rows: any[];
-    try {
-      rows = this.db.prepare(sql).all(...params);
-    } catch (err: any) {
-      throw new Error(`vectors blob read error: ${err?.message || err}`);
-    }
-
-    const now = Date.now();
-    return rows
-      .map((r: any) => {
-        if (filterByTaskIdPrefix && !String(r.task_id ?? '').startsWith(filterByTaskIdPrefix)) return null;
-        const contentLen = r.content?.length ?? 0;
-        if (contentLen < minContentLength) return null;
-
-        let score = 1 / (1 + r.distance);
-
-        // Sender weight
-        const sid = String(r.sender_id ?? '');
-        for (const [key, weight] of Object.entries(senderWeightMap)) {
-          if (sid === key || sid.toLowerCase().startsWith(key.toLowerCase())) {
-            if (weight < 1.0) score *= weight;
-            break;
-          }
-        }
-
-        // Time decay
-        if (timeDecayDays > 0 && r.created_at) {
-          const ageDays = (now - Number(r.created_at)) / (1000 * 60 * 60 * 24);
-          score *= 0.3 + 0.7 * Math.exp(-ageDays / timeDecayDays);
-        }
-
-        return { id: r.message_id, taskId: r.task_id, senderId: r.sender_id, content: r.content, score };
-      })
-      .filter((r): r is NonNullable<typeof r> => r !== null)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+  async pivotBranch(taskId: string): Promise<string> {
+    const branchId = randomUUID();
+    const stmt = this.db.prepare('UPDATE tasks SET current_branch_id = ?, updated_at = ? WHERE id = ?');
+    stmt.run(branchId, Date.now(), taskId);
+    return branchId;
   }
 
   /**

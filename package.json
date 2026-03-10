@@ -1,6 +1,6 @@
 {
   "name": "@kuafu/framework",
-  "version": "1.0.2",
+  "version": "1.2.0",
   "description": "Channel-agnostic Agent Runtime Framework",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,14 +26,6 @@
     "./telemetry": {
       "types": "./dist/telemetry.d.ts",
       "import": "./dist/telemetry.js"
-    },
-    "./llm-client": {
-      "types": "./dist/llm-client.d.ts",
-      "import": "./dist/llm-client.js"
-    },
-    "./routing-config": {
-      "types": "./dist/routing-config.d.ts",
-      "import": "./dist/routing-config.js"
     }
   },
   "repository": {
@@ -59,7 +51,8 @@
   "dependencies": {
     "better-sqlite3": "^12.6.2",
     "pino": "^10.3.1",
-    "pino-pretty": "^13.1.3"
+    "pino-pretty": "^13.1.3",
+    "sqlite-vec": "^0.1.7-alpha.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
@@ -73,8 +66,5 @@
   ],
   "engines": {
     "node": ">=20"
-  },
-  "optionalDependencies": {
-    "sqlite-vec": "^0.1.7-alpha.2"
   }
 }

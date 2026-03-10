@@ -4,36 +4,17 @@
 
 // Core modules
 import { Store } from './store.js';
-import { telemetry, runWithTrace, ConsoleSink, SQLiteSink } from './telemetry.js';
+import { telemetry, runWithTrace } from './telemetry.js';
 import { Action } from './action.js';
 import { Perception } from './perception.js';
 import { Decision } from './decision.js';
 import { Kernel } from './kernel/index.js';
+import { createRequire } from 'node:module';
 
-export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace, ConsoleSink, SQLiteSink };
-
-// Types from sub-modules not in types.ts
-export type { DecisionResult } from './decision.js';
-export type { Skill, AgentState } from './perception.js';
+export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace };
 
 // Types
 export type {
-  IStore,
-  IAction,
-  IProgressSink,
-  SaveTaskMessageInput,
-  IPerception,
-  IDecision,
-  IDecisionResult,
-  IDecisionTurn,
-  IPerceptionInput,
-  IPerceptionOutput,
-  IPerceptionState,
-  ContextBlock,
-  ContextBlockType,
-  ProgressEventLike,
-  StoreTaskLike,
-  StoreMessageLike,
   Task,
   TaskStatus,
   Message,
@@ -42,20 +23,20 @@ export type {
   ToolCall,
   KernelRunOptions,
   KernelRunResult,
-  LLMCallOptions,
-  LLMCallResult,
-  LLMFunction,
-  ToolEvidence,
   ProgressEvent,
-  ProgressSink,
-  OutcomePayload,
-  OutcomeSink,
-  MemoryItem,
-  MemoryProvider
+  ProgressSink
 } from './types.js';
 
-// Version
-export const VERSION = '1.2.0-ts';
+export type {
+  LLMProvider,
+  LLMCallOptions,
+  LLMCallResult
+} from './kernel/types.js';
+
+// Version — single source of truth from package.json
+const require = createRequire(import.meta.url);
+const pkg = require('../package.json');
+export const VERSION: string = pkg.version;
 
 const kuafuFramework = {
   VERSION,
@@ -65,9 +46,7 @@ const kuafuFramework = {
   Decision,
   Kernel,
   telemetry,
-  runWithTrace,
-  ConsoleSink,
-  SQLiteSink
+  runWithTrace
 };
 
 export default kuafuFramework;
