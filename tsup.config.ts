@@ -7,6 +7,8 @@ export default defineConfig({
     'kernel': 'src/kernel/index.ts',
     'action': 'src/action.ts',
     'telemetry': 'src/telemetry.ts',
+    'llm-client': 'src/llm-client.ts',
+    'routing-config': 'src/routing-config.ts',
   },
   outDir: 'dist',
   outExtension: () => ({ js: '.js' }),
@@ -16,5 +18,5 @@ export default defineConfig({
   clean: true,
   minify: false,
   target: 'node20',
-  external: ['better-sqlite3', 'pino', 'sqlite-vec'],
+  external: ['better-sqlite3', 'pino', 'sqlite-vec']
 });

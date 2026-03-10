@@ -1,6 +1,6 @@
 {
   "name": "@kuafu/framework",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Channel-agnostic Agent Runtime Framework",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,6 +26,14 @@
     "./telemetry": {
       "types": "./dist/telemetry.d.ts",
       "import": "./dist/telemetry.js"
+    },
+    "./llm-client": {
+      "types": "./dist/llm-client.d.ts",
+      "import": "./dist/llm-client.js"
+    },
+    "./routing-config": {
+      "types": "./dist/routing-config.d.ts",
+      "import": "./dist/routing-config.js"
     }
   },
   "repository": {
@@ -45,8 +53,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/*.test.js",
-    "prepare": "npm run build"
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",
