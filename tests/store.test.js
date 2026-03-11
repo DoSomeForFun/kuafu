@@ -6,6 +6,8 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { Store } from '../dist/index.js';
+import Database from 'better-sqlite3';
+import { load as loadSqliteVec } from 'sqlite-vec';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -201,6 +203,60 @@ describe('Store - TDD', () => {
       const memStore = new Store(':memory:');
       assert.ok(memStore, '应该能创建内存数据库');
       memStore.close();
+    });
+
+    it('应该兼容已有 vec0 虚表的 context_vectors', async () => {
+      const vecDbPath = path.join(process.cwd(), 'data', 'test-store-vec.sqlite');
+      for (const suffix of ['', '-wal', '-shm']) {
+        const filePath = vecDbPath + suffix;
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
+
+      const rawDb = new Database(vecDbPath);
+      loadSqliteVec(rawDb);
+      rawDb.exec(`
+        CREATE VIRTUAL TABLE context_vectors USING vec0(
+          message_id TEXT,
+          task_id TEXT,
+          sender_id TEXT,
+          content TEXT,
+          embedding FLOAT[384],
+          created_at TEXT
+        );
+      `);
+      rawDb.close();
+
+      const compatStore = new Store(vecDbPath);
+      await compatStore.upsertVector({
+        messageId: 'vec-msg-1',
+        taskId: 'vec-task-1',
+        senderId: 'vec-sender-1',
+        content: '第一次写入',
+        embedding: new Array(384).fill(0)
+      });
+      await compatStore.upsertVector({
+        messageId: 'vec-msg-1',
+        taskId: 'vec-task-1',
+        senderId: 'vec-sender-1',
+        content: '第二次写入',
+        embedding: new Array(384).fill(1)
+      });
+
+      const row = compatStore.db.prepare(`
+        SELECT content
+        FROM context_vectors
+        WHERE message_id = ?
+        LIMIT 1
+      `).get('vec-msg-1');
+
+      assert.ok(row, '应该能在 vec0 虚表里找到写入记录');
+      assert.strictEqual(row.content, '第二次写入');
+      compatStore.close();
+
+      for (const suffix of ['', '-wal', '-shm']) {
+        const filePath = vecDbPath + suffix;
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      }
     });
   });
 });

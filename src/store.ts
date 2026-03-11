@@ -434,16 +434,33 @@ export class Store {
       }
     }
 
-    // Recency fallback
-    const rows = this.db.prepare(`
-      SELECT message_id AS id, task_id AS taskId, sender_id AS senderId, content, 0.5 AS score
-      FROM context_vectors
-      WHERE task_id = ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    `).all(input.filterByTaskId ?? '', limit) as SearchResult[];
-
-    return rows;
+    // Recency fallback. Prefer ordinary tables because older mounted datasets may
+    // use sqlite-vec virtual tables for context_vectors, which reject these scans.
+    try {
+      let rows: SearchResult[];
+      if (input.filterByTaskIdPrefix) {
+        rows = this.db.prepare(`
+          SELECT id, task_id AS taskId, sender_id AS senderId, content, 0.5 AS score
+          FROM messages
+          WHERE task_id LIKE ?
+            AND is_archived = 0
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(`${input.filterByTaskIdPrefix}%`, limit) as SearchResult[];
+      } else {
+        rows = this.db.prepare(`
+          SELECT id, task_id AS taskId, sender_id AS senderId, content, 0.5 AS score
+          FROM messages
+          WHERE task_id = ?
+            AND is_archived = 0
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(input.filterByTaskId ?? '', limit) as SearchResult[];
+      }
+      return rows;
+    } catch {
+      return [];
+    }
   }
 
   private _applyWeights(rows: any[], senderWeightMap?: Record<string, number>): SearchResult[] {
