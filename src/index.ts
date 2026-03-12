@@ -12,6 +12,14 @@ import { Kernel } from './kernel/index.js';
 import { createRequire } from 'node:module';
 
 export { Store, Action, Perception, Decision, Kernel, telemetry, runWithTrace };
+export type {
+  ContextScope,
+  RuntimeEvent,
+  RuntimeEventType,
+  RuntimeHookDecision,
+  BeforeRunHook,
+  AfterRunHook
+} from './runtime.js';
 
 // Types
 export type {

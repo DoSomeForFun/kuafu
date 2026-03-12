@@ -1,3 +1,11 @@
+import type {
+  AfterRunHook,
+  BeforeRunHook,
+  ContextScope,
+  RuntimeEvent,
+  RuntimeHookDecision
+} from '../runtime.js';
+
 /**
  * Optional embedding function — inject to enable semantic memory recall.
  * Converts text to a float vector (e.g. BGE-M3, OpenAI text-embedding-3).
@@ -24,6 +32,7 @@ export interface KernelRunOptions {
   prompt: string;
   sessionId: string;
   contextScope?: 'isolated' | 'linked' | 'conversation';
+  runtimeScope?: ContextScope;
   agentName?: string;
   /** Max agent turns (THINKING→DECIDING→ACTING→REFLECTING = 1 turn) */
   maxTurns?: number;
@@ -37,6 +46,9 @@ export interface KernelRunOptions {
   progressSink?: any;
   onStep?: (context: any) => void;
   isSimpleChat?: boolean;
+  runtimeEvent?: RuntimeEvent;
+  beforeRunHooks?: BeforeRunHook[];
+  afterRunHooks?: AfterRunHook[];
 }
 
 /**
@@ -59,6 +71,7 @@ export interface KernelContext {
   store: any;
   embedFn?: EmbedFn;
   decision?: any;
+  perception?: any;
   llmProvider?: LLMProvider;
   
   // Runtime State
@@ -70,11 +83,15 @@ export interface KernelContext {
   isWorkspaceReady: boolean;
   forceSimpleChat?: boolean;
   promptEmbedding?: number[];
+  runtimeScope: ContextScope;
+  runtimeEvent: RuntimeEvent | null;
+  lastHookDecision?: RuntimeHookDecision | null;
   
   // Data
   task: any;
   currentBranchId: string;
   retrievedContext: any[];
+  lessons?: any[];
   sensoryData: any | null;
   contextBlock: string;
   turnResult: any | null;
@@ -115,6 +132,10 @@ export interface KernelRunResult {
       affinityHit: boolean;
       recipeHit: boolean;
       sessionKey: string;
+    };
+    hooks?: {
+      beforeRun?: RuntimeHookDecision | null;
+      afterRun?: RuntimeHookDecision | null;
     };
   };
 }

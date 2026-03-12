@@ -153,9 +153,9 @@ describe('Store - TDD', () => {
       };
 
       await store.saveLesson(lesson);
-
-      // Verify lesson was saved (would need getLessons method in full implementation)
-      assert.ok(true, '保存教训应该成功');
+      const lessons = await store.getLessons('test-task-1', 'branch-1', 4);
+      assert.strictEqual(lessons.length, 1);
+      assert.strictEqual(lessons[0].what_not_to_do, '不要这样做');
     });
   });
 

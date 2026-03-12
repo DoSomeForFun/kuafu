@@ -34,6 +34,7 @@ export interface AgentState {
  */
 export class Perception {
   private config: any;
+  private store: any;
   private _allSkills: Skill[] | null;
   private _skillsLoadedAt: number;
   private skillRefreshMs: number;
@@ -42,6 +43,7 @@ export class Perception {
 
   constructor(config: any = {}) {
     this.config = config;
+    this.store = config.store || null;
     this._allSkills = null;
     this._skillsLoadedAt = 0;
     this.skillRefreshMs = this._toSafeInt(
@@ -144,7 +146,8 @@ export class Perception {
 
       const state = this.observe(sessionId, taskId, task);
       const workspace = this.observeWorkspace();
-      const lessons: any[] = [];
+      const branchId = task?.current_branch_id || task?.currentBranchId || undefined;
+      const lessons = await this.readLessons(taskId, branchId);
 
       return {
         skills,
@@ -188,6 +191,49 @@ export class Perception {
     };
 
     return this._workspace;
+  }
+
+  async readLessons(taskId?: string, branchId?: string): Promise<any[]> {
+    if (!taskId || !this.store || typeof this.store.getLessons !== 'function') {
+      return [];
+    }
+    try {
+      return await this.store.getLessons(taskId, branchId, 4);
+    } catch (e: any) {
+      telemetry.warn('[Perception] Lesson retrieval failed', { error: e.message });
+      return [];
+    }
+  }
+
+  formatToContext(input: { lessons?: any[]; retrievedContext?: any[] }): string {
+    const blocks: string[] = [];
+    const lessons = Array.isArray(input.lessons) ? input.lessons : [];
+    if (lessons.length > 0) {
+      const lines = ['## Lessons Learned'];
+      for (const lesson of lessons) {
+        const rootCause = String(lesson?.root_cause || '').trim();
+        const avoid = String(lesson?.what_not_to_do || '').trim();
+        const alternative = String(lesson?.suggested_alternatives || '').trim();
+        if (rootCause) lines.push(`- Root cause: ${rootCause}`);
+        if (avoid) lines.push(`- Avoid: ${avoid}`);
+        if (alternative) lines.push(`- Alternative: ${alternative}`);
+      }
+      blocks.push(lines.join('\n'));
+    }
+    const retrieved = Array.isArray(input.retrievedContext) ? input.retrievedContext : [];
+    if (retrieved.length > 0) {
+      const lines = retrieved
+        .filter((item) => item?.content)
+        .map((item) => {
+          const sender = item.senderId || item.sender_id || 'unknown';
+          const text = String(item.content).slice(0, 400);
+          return `[${sender}]: ${text}`;
+        });
+      if (lines.length > 0) {
+        blocks.push(`## Relevant Context\n${lines.join('\n')}`);
+      }
+    }
+    return blocks.join('\n\n');
   }
 
   /**

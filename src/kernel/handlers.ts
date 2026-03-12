@@ -13,6 +13,7 @@ export async function handlePerceiving(context: KernelContext): Promise<KernelCo
   try {
     let embedding = context.promptEmbedding;
     let retrievedContext = context.retrievedContext ?? [];
+    let lessons = Array.isArray(context.lessons) ? context.lessons : [];
 
     // Generate embedding on demand if embedFn is available and not pre-supplied
     if (!embedding && context.embedFn) {
@@ -37,14 +38,38 @@ export async function handlePerceiving(context: KernelContext): Promise<KernelCo
       }
     }
 
-    // Build contextBlock from retrieved items
-    const contextBlock = buildContextBlock(retrievedContext);
+    if (context.perception?.gather) {
+      try {
+        const perceptionResult = await context.perception.gather({
+          prompt: context.originalPrompt,
+          task: context.task,
+          retrievedContext,
+          sessionId: context.sessionId,
+          taskId: context.taskId,
+          isSimpleChat: context.forceSimpleChat
+        });
+        if (Array.isArray(perceptionResult?.retrievedContext) && perceptionResult.retrievedContext.length > 0) {
+          retrievedContext = perceptionResult.retrievedContext;
+        }
+        if (Array.isArray(perceptionResult?.lessons)) {
+          lessons = perceptionResult.lessons;
+        }
+      } catch {
+        // non-fatal
+      }
+    }
 
-    span.end({ retrievedCount: retrievedContext.length });
+    // Build contextBlock from retrieved items
+    const contextBlock = context.perception?.formatToContext
+      ? context.perception.formatToContext({ lessons, retrievedContext })
+      : buildContextBlock(retrievedContext, lessons);
+
+    span.end({ retrievedCount: retrievedContext.length, lessonCount: lessons.length });
     return {
       ...context,
       promptEmbedding: embedding,
       retrievedContext,
+      lessons,
       contextBlock,
       state: 'THINKING',
     };
@@ -54,8 +79,23 @@ export async function handlePerceiving(context: KernelContext): Promise<KernelCo
   }
 }
 
-function buildContextBlock(items: any[]): string {
-  if (!items.length) return '';
+function buildContextBlock(items: any[], lessons: any[] = []): string {
+  const blocks: string[] = [];
+  if (Array.isArray(lessons) && lessons.length > 0) {
+    const lessonLines = ['## Lessons Learned'];
+    for (const lesson of lessons) {
+      const rootCause = String(lesson?.root_cause || '').trim();
+      const avoid = String(lesson?.what_not_to_do || '').trim();
+      const alternative = String(lesson?.suggested_alternatives || '').trim();
+      if (rootCause) lessonLines.push(`- Root cause: ${rootCause}`);
+      if (avoid) lessonLines.push(`- Avoid: ${avoid}`);
+      if (alternative) lessonLines.push(`- Alternative: ${alternative}`);
+    }
+    if (lessonLines.length > 1) {
+      blocks.push(lessonLines.join('\n'));
+    }
+  }
+
   const lines = items
     .filter(item => item?.content)
     .map(item => {
@@ -63,8 +103,10 @@ function buildContextBlock(items: any[]): string {
       const text = String(item.content).slice(0, MAX_ITEM_CHARS);
       return `[${sender}]: ${text}`;
     });
-  if (!lines.length) return '';
-  return `## Relevant Context\n${lines.join('\n')}`;
+  if (lines.length > 0) {
+    blocks.push(`## Relevant Context\n${lines.join('\n')}`);
+  }
+  return blocks.join('\n\n');
 }
 
 /**

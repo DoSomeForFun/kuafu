@@ -1,7 +1,87 @@
 import { telemetry, runWithTrace } from '../telemetry.js';
+import { Perception } from '../perception.js';
 import { KernelFSM } from './fsm.js';
 import { handlePerceiving, handleThinking, handleDeciding, handleActing, handleReflecting } from './handlers.js';
 import type { KernelContext, KernelRunOptions, KernelRunResult, KernelState, LLMProvider, LLMCallOptions, LLMCallResult, EmbedFn } from './types.js';
+import type { AfterRunHook, BeforeRunHook, ContextScope, RuntimeEvent, RuntimeHookDecision } from '../runtime.js';
+
+function normalizeRuntimeScope(
+  runtimeScope: ContextScope | undefined,
+  contextScope: KernelRunOptions['contextScope']
+): ContextScope {
+  if (runtimeScope) return runtimeScope;
+  if (contextScope === 'conversation') return 'conversation';
+  if (contextScope === 'linked') return 'global';
+  return 'local';
+}
+
+function buildDefaultRuntimeEvent(options: {
+  taskId: string;
+  sessionId: string;
+  prompt: string;
+  scope: ContextScope;
+  runtimeEvent?: RuntimeEvent;
+}): RuntimeEvent {
+  if (options.runtimeEvent) {
+    return {
+      ...options.runtimeEvent,
+      taskId: options.runtimeEvent.taskId || options.taskId,
+      sessionId: options.runtimeEvent.sessionId || options.sessionId,
+      content: options.runtimeEvent.content ?? options.prompt,
+      scope: options.runtimeEvent.scope || options.scope,
+      createdAt: options.runtimeEvent.createdAt || Date.now()
+    };
+  }
+  return {
+    type: 'user_message',
+    scope: options.scope,
+    actorId: 'user',
+    taskId: options.taskId,
+    sessionId: options.sessionId,
+    content: options.prompt,
+    createdAt: Date.now()
+  };
+}
+
+async function runBeforeHooks(
+  hooks: BeforeRunHook[],
+  input: {
+    event: RuntimeEvent;
+    prompt: string;
+    taskId: string;
+    sessionId: string;
+    scope: ContextScope;
+  }
+): Promise<RuntimeHookDecision> {
+  for (const hook of hooks) {
+    const decision = await hook(input);
+    if (decision && decision.action !== 'allow') {
+      return decision;
+    }
+  }
+  return { action: 'allow' };
+}
+
+async function runAfterHooks(
+  hooks: AfterRunHook[],
+  input: {
+    event: RuntimeEvent;
+    prompt: string;
+    content: string;
+    success: boolean;
+    taskId: string;
+    sessionId: string;
+    scope: ContextScope;
+  }
+): Promise<RuntimeHookDecision> {
+  for (const hook of hooks) {
+    const decision = await hook(input);
+    if (decision && decision.action !== 'allow') {
+      return decision;
+    }
+  }
+  return { action: 'allow' };
+}
 
 /**
  * The Unified Kernel - Agent execution orchestrator
@@ -12,6 +92,7 @@ import type { KernelContext, KernelRunOptions, KernelRunResult, KernelState, LLM
 export class Kernel {
   private store: any;
   private action: any;
+  private perception: any;
   private llmProvider: LLMProvider;
   private progressSink: any;
   private embedFn?: EmbedFn;
@@ -28,6 +109,7 @@ export class Kernel {
   } = {}) {
     this.store = options.store || options.backend;
     this.action = options.action || null;
+    this.perception = options.perception || new Perception({ store: this.store });
     this.llmProvider = options.llmProvider || new StubLLMProvider();
     this.progressSink = options.progressSink || null;
     this.embedFn = options.embedFn;
@@ -49,11 +131,23 @@ export class Kernel {
       isSimpleChat: forceSimpleChat,
       promptEmbedding,
       embedFn: runEmbedFn,
+      runtimeScope,
+      runtimeEvent,
+      beforeRunHooks = [],
+      afterRunHooks = [],
     } = options;
 
     const traceId = `task-${taskId}-sess-${sessionId}-${Date.now()}`;
     const resolvedProgressSink = progressSink || this.progressSink;
     const resolvedEmbedFn = runEmbedFn || this.embedFn;
+    const resolvedScope = normalizeRuntimeScope(runtimeScope, options.contextScope);
+    const resolvedRuntimeEvent = buildDefaultRuntimeEvent({
+      taskId,
+      sessionId,
+      prompt: originalPrompt,
+      scope: resolvedScope,
+      runtimeEvent
+    });
 
     return runWithTrace(traceId, async () => {
       const span = telemetry.startSpan('Kernel.run');
@@ -63,10 +157,38 @@ export class Kernel {
         if (!task) throw new Error(`Task not found: ${taskId}`);
 
         const currentBranchId = task.current_branch_id || (await this.store.pivotBranch(taskId));
-        await this.saveUserPrompt(taskId, currentBranchId, originalPrompt);
+        const beforeRunDecision = await runBeforeHooks(beforeRunHooks, {
+          event: resolvedRuntimeEvent,
+          prompt: originalPrompt,
+          taskId,
+          sessionId,
+          scope: resolvedScope
+        });
+        const effectivePrompt = beforeRunDecision.action === 'rewrite' && beforeRunDecision.prompt
+          ? beforeRunDecision.prompt
+          : originalPrompt;
+        if (beforeRunDecision.action === 'capture' || beforeRunDecision.action === 'silence') {
+          const durationMs = 0;
+          return {
+            success: true,
+            status: 'DONE',
+            content: '',
+            steps: 0,
+            durationMs,
+            stopReason: beforeRunDecision.reason || beforeRunDecision.action,
+            meta: {
+              hooks: {
+                beforeRun: beforeRunDecision,
+                afterRun: null
+              }
+            }
+          };
+        }
+
+        await this.saveUserPrompt(taskId, currentBranchId, effectivePrompt);
 
         const context: KernelContext = {
-          taskId, sessionId, originalPrompt,
+          taskId, sessionId, originalPrompt: effectivePrompt,
           maxSteps: 0, maxHistory,
           agentName: options.agentName,
           onStep,
@@ -77,9 +199,14 @@ export class Kernel {
           turnHint: null,
           isWorkspaceReady: false,
           forceSimpleChat, promptEmbedding,
+          runtimeScope: resolvedScope,
+          runtimeEvent: resolvedRuntimeEvent,
+          lastHookDecision: beforeRunDecision,
           store: this.store,
+          perception: this.perception,
           embedFn: resolvedEmbedFn,
           task, currentBranchId, retrievedContext,
+          lessons: [],
           sensoryData: null, contextBlock: '',
           turnResult: null, advice: null, finalResult: null,
           isReroute: false,
@@ -105,15 +232,50 @@ export class Kernel {
         });
 
         const durationMs = Date.now() - context.runStartTime;
-        const kernelResult: KernelRunResult = {
+        let kernelResult: KernelRunResult = {
           success: context.state === 'DONE',
           status: context.state as 'DONE' | 'FAILED',
           content: context.finalResult?.content || '',
           steps: context.stepCount,
           durationMs,
           stopReason: context.finalResult?.stopReason,
-          meta: { loop: { stopReason: context.finalResult?.stopReason, durationMs } }
+          meta: {
+            loop: { stopReason: context.finalResult?.stopReason, durationMs },
+            hooks: {
+              beforeRun: beforeRunDecision,
+              afterRun: null
+            }
+          }
         };
+
+        const afterRunDecision = await runAfterHooks(afterRunHooks, {
+          event: resolvedRuntimeEvent,
+          prompt: effectivePrompt,
+          content: kernelResult.content,
+          success: kernelResult.success,
+          taskId,
+          sessionId,
+          scope: resolvedScope
+        });
+        kernelResult.meta = {
+          ...(kernelResult.meta || {}),
+          hooks: {
+            beforeRun: beforeRunDecision,
+            afterRun: afterRunDecision
+          }
+        };
+        if (afterRunDecision.action === 'silence' || afterRunDecision.action === 'capture') {
+          kernelResult = {
+            ...kernelResult,
+            content: '',
+            stopReason: afterRunDecision.reason || afterRunDecision.action
+          };
+        } else if (afterRunDecision.action === 'rewrite' && typeof afterRunDecision.content === 'string') {
+          kernelResult = {
+            ...kernelResult,
+            content: afterRunDecision.content
+          };
+        }
 
         span.end({ success: kernelResult.success, durationMs });
         return kernelResult;

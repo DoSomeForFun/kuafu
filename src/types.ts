@@ -1,3 +1,10 @@
+import type {
+  AfterRunHook,
+  BeforeRunHook,
+  ContextScope,
+  RuntimeEvent
+} from './runtime.js';
+
 /**
  * Task interface
  */
@@ -78,6 +85,7 @@ export interface KernelRunOptions {
   prompt: string;
   sessionId: string;
   contextScope?: 'isolated' | 'linked' | 'conversation';
+  runtimeScope?: ContextScope;
   agentName?: string;
   /** Max agent turns (THINKING→DECIDING→ACTING→REFLECTING = 1 turn) */
   maxTurns?: number;
@@ -86,6 +94,9 @@ export interface KernelRunOptions {
   maxHistory?: number;
   retrievedContext?: any[];
   promptEmbedding?: number[];
+  runtimeEvent?: RuntimeEvent;
+  beforeRunHooks?: BeforeRunHook[];
+  afterRunHooks?: AfterRunHook[];
 }
 
 /**

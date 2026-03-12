@@ -46,6 +46,7 @@ export interface SearchResult {
 export class Store {
   public db: Database.Database;
   private vecAvailable: boolean = false;
+  private contextVectorsIsVirtual: boolean = false;
 
   constructor(dbPath: string = 'data/agent-tasks.sqlite') {
     if (dbPath !== ':memory:') {
@@ -67,6 +68,12 @@ export class Store {
     }
 
     this._initSchema();
+  }
+
+  private _toFloat32Vector(embedding: number[] | Float32Array): Float32Array {
+    return embedding instanceof Float32Array
+      ? embedding
+      : new Float32Array(embedding);
   }
 
   private _initSchema(): void {
@@ -155,6 +162,11 @@ export class Store {
       );
     `);
 
+    const contextVectorsSql = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE name = 'context_vectors'`)
+      .get() as { sql?: string } | undefined;
+    this.contextVectorsIsVirtual = /create\s+virtual\s+table/i.test(String(contextVectorsSql?.sql || ''));
+
     // Create indexes
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id);
@@ -163,8 +175,41 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_llm_executions_task ON llm_executions(task_id);
       CREATE INDEX IF NOT EXISTS idx_runs_chat ON runs(chat_id);
       CREATE INDEX IF NOT EXISTS idx_runs_sender ON runs(sender_id);
-      CREATE INDEX IF NOT EXISTS idx_context_vectors_task ON context_vectors(task_id);
     `);
+
+    if (!this.contextVectorsIsVirtual) {
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_context_vectors_task ON context_vectors(task_id);
+      `);
+      return;
+    }
+
+    this._repairVirtualContextVectorsIfNeeded(String(contextVectorsSql?.sql || ''));
+  }
+
+  private _repairVirtualContextVectorsIfNeeded(createSql: string): void {
+    if (!this.contextVectorsIsVirtual) return;
+    if (!createSql) return;
+
+    try {
+      const chunkInfo = this.db.prepare(`
+        SELECT
+          count(*) AS count,
+          coalesce(min(length(vectors)), 0) AS min_len,
+          coalesce(max(length(vectors)), 0) AS max_len
+        FROM context_vectors_vector_chunks00
+      `).get() as { count?: number; min_len?: number; max_len?: number } | undefined;
+
+      const chunkCount = Number(chunkInfo?.count || 0);
+      const maxLen = Number(chunkInfo?.max_len || 0);
+      if (chunkCount === 0 || maxLen > 0) return;
+
+      console.warn('[Store] Detected corrupted sqlite-vec shadow chunks for context_vectors; rebuilding virtual table');
+      this.db.exec('DROP TABLE IF EXISTS context_vectors;');
+      this.db.exec(createSql);
+    } catch {
+      // Ignore repair failures; caller will continue with best-effort recency fallback.
+    }
   }
 
   /**
@@ -306,6 +351,44 @@ export class Store {
   }
 
   /**
+   * Read lessons for a task/branch, newest first.
+   */
+  async getLessons(taskId: string, branchId?: string, limit = 6): Promise<Array<{
+    id: string;
+    task_id: string;
+    branch_id: string;
+    root_cause: string;
+    what_not_to_do: string;
+    suggested_alternatives?: string | null;
+    trajectory?: string | null;
+    created_at: number;
+  }>> {
+    let sql = `
+      SELECT id, task_id, branch_id, root_cause, what_not_to_do, suggested_alternatives, trajectory, created_at
+      FROM lessons
+      WHERE task_id = ?
+    `;
+    const params: unknown[] = [taskId];
+    if (branchId) {
+      sql += ' AND branch_id = ?';
+      params.push(branchId);
+    }
+    sql += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(Math.max(1, Math.floor(limit)));
+    const rows = this.db.prepare(sql).all(...params) as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      task_id: row.task_id,
+      branch_id: row.branch_id,
+      root_cause: row.root_cause,
+      what_not_to_do: row.what_not_to_do,
+      suggested_alternatives: row.suggested_alternatives ?? null,
+      trajectory: row.trajectory ?? null,
+      created_at: row.created_at
+    }));
+  }
+
+  /**
    * Save LLM execution record
    */
   async saveLLMExecution(execution: {
@@ -366,18 +449,27 @@ export class Store {
     content: string;
     embedding: number[] | Float32Array;
   }): void {
-    const buf = Buffer.from(
-      input.embedding instanceof Float32Array
-        ? input.embedding.buffer
-        : new Float32Array(input.embedding).buffer
-    );
-    this.db.prepare(`
-      INSERT INTO context_vectors (message_id, task_id, sender_id, content, embedding, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(message_id) DO UPDATE SET
-        content   = excluded.content,
-        embedding = excluded.embedding
-    `).run(input.messageId, input.taskId, input.senderId, input.content, buf, Date.now());
+    const vector = this._toFloat32Vector(input.embedding);
+    const createdAt = this.contextVectorsIsVirtual ? String(Date.now()) : Date.now();
+    try {
+      this.db.prepare(`
+        INSERT INTO context_vectors (message_id, task_id, sender_id, content, embedding, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+          content   = excluded.content,
+          embedding = excluded.embedding
+      `).run(input.messageId, input.taskId, input.senderId, input.content, vector, createdAt);
+    } catch {
+      if (!this.contextVectorsIsVirtual) {
+        throw new Error('failed to upsert context vector');
+      }
+
+      this.db.prepare('DELETE FROM context_vectors WHERE message_id = ?').run(input.messageId);
+      this.db.prepare(`
+        INSERT INTO context_vectors (message_id, task_id, sender_id, content, embedding, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(input.messageId, input.taskId, input.senderId, input.content, vector, createdAt);
+    }
   }
 
   /**
@@ -401,11 +493,7 @@ export class Store {
 
     if (this.vecAvailable) {
       try {
-        const buf = Buffer.from(
-          input.embedding instanceof Float32Array
-            ? input.embedding.buffer
-            : new Float32Array(input.embedding).buffer
-        );
+        const vector = this._toFloat32Vector(input.embedding);
 
         let rows: any[];
         if (input.filterByTaskIdPrefix) {
@@ -416,7 +504,7 @@ export class Store {
             WHERE task_id LIKE ? AND embedding IS NOT NULL
             ORDER BY score ASC
             LIMIT ?
-          `).all(buf, `${input.filterByTaskIdPrefix}%`, limit);
+          `).all(vector, `${input.filterByTaskIdPrefix}%`, limit);
         } else {
           rows = this.db.prepare(`
             SELECT message_id AS id, task_id AS taskId, sender_id AS senderId, content,
@@ -425,7 +513,7 @@ export class Store {
             WHERE task_id = ? AND embedding IS NOT NULL
             ORDER BY score ASC
             LIMIT ?
-          `).all(buf, input.filterByTaskId ?? '', limit);
+          `).all(vector, input.filterByTaskId ?? '', limit);
         }
 
         return this._applyWeights(rows, input.senderWeightMap);
