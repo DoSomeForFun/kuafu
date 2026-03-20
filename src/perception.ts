@@ -1,4 +1,5 @@
 import { telemetry } from './telemetry.js';
+import { type DiscoveredSkill, type SkillSchema, discoverSkills, routeSkillsByPrompt, formatSkillsPrompt } from './skills.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -16,6 +17,9 @@ export interface Skill {
   argsMode?: string;
   source?: string;
   isBuiltin?: boolean;
+  skillPath?: string;
+  schema?: SkillSchema;
+  content?: string;
 }
 
 /**
@@ -35,7 +39,7 @@ export interface AgentState {
 export class Perception {
   private config: any;
   private store: any;
-  private _allSkills: Skill[] | null;
+  private _allSkills: DiscoveredSkill[] | null;
   private _skillsLoadedAt: number;
   private skillRefreshMs: number;
   private _soul: string | null;
@@ -65,16 +69,20 @@ export class Perception {
   /**
    * Get discovered skills
    */
-  private _getSkills(): Skill[] {
+  private _getSkills(): DiscoveredSkill[] {
     const now = Date.now();
     const expired = now - this._skillsLoadedAt >= this.skillRefreshMs;
-    
+
     if (!this._allSkills || expired) {
-      // Simplified: in full implementation, would call listDiscoveredSkills
-      this._allSkills = [];
+      this._allSkills = discoverSkills({
+        skillRoots: this.config.skillRoots || [],
+        skillBaseDirs: this.config.skillBaseDirs || [],
+        cwd: this.config.cwd || process.cwd(),
+        log: this.config.log
+      });
       this._skillsLoadedAt = now;
     }
-    
+
     return this._allSkills || [];
   }
 
@@ -237,20 +245,47 @@ export class Perception {
   }
 
   /**
-   * Route skills based on prompt (simplified keyword matching)
+   * Route skills based on prompt
    */
-  async routeSkills(prompt: string): Promise<Skill[]> {
+  async routeSkills(prompt: string): Promise<DiscoveredSkill[]> {
     const skills = this._getSkills();
-    const promptLower = prompt.toLowerCase();
+    return routeSkillsByPrompt(skills, prompt);
+  }
 
-    // Simple keyword matching
-    const matchedSkills = skills.filter(skill => {
-      const nameMatch = promptLower.includes(skill.name.toLowerCase());
-      const descMatch = skill.description && promptLower.includes(skill.description.toLowerCase());
-      return nameMatch || descMatch;
-    });
+  /**
+   * Build skills hint for prompt injection
+   */
+  buildSkillsHint(
+    prompt?: string,
+    options: { excludePattern?: RegExp; injectMode?: string } = {}
+  ): string {
+    let skills = this._getSkills();
 
-    return matchedSkills;
+    if (options.excludePattern) {
+      skills = skills.filter(
+        (skill) =>
+          !options.excludePattern!.test(skill.name) &&
+          !options.excludePattern!.test(skill.skillPath)
+      );
+    }
+
+    if (skills.length === 0) return '';
+
+    const mode = options.injectMode || this.config.skillInjectMode || 'all';
+    const routed = mode === 'routed' && prompt
+      ? routeSkillsByPrompt(skills, prompt)
+      : skills;
+
+    const target = routed.length > 0 ? routed : skills;
+    
+    if (this.config.log) {
+      this.config.log(
+        `[Perception] Skills injected count=${target.length} mode=${mode} `
+        + `names=${target.map((s) => s.name).join(',') || '-'}`
+      );
+    }
+
+    return formatSkillsPrompt(target);
   }
 
   /**

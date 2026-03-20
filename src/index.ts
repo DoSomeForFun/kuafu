@@ -41,6 +41,13 @@ export type {
   LLMCallResult
 } from './kernel/types.js';
 
+export type {
+  DiscoveredSkill,
+  SkillSchema
+} from './skills.js';
+
+export type { Skill } from './perception.js';
+
 // Version — single source of truth from package.json
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json');
