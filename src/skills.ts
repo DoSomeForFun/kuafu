@@ -28,10 +28,10 @@ export type DiscoverOptions = {
   log?: (message: string) => void;
 };
 
-const STOPWORDS = new Set([
+export const DEFAULT_STOPWORDS = [
   '用户要求', '定时', '需要', '获取', '查看', '用户说', '用户要',
   'get', 'use', 'make', 'find', 'set', 'run', 'the', 'for', 'and', 'when', 'how', 'can', 'want', 'need'
-]);
+];
 
 function nonEmptyString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
@@ -153,7 +153,12 @@ export function discoverSkills(options: DiscoverOptions): DiscoveredSkill[] {
   return skills;
 }
 
-export function routeSkillsByPrompt(skills: DiscoveredSkill[], prompt: string): DiscoveredSkill[] {
+export function routeSkillsByPrompt(
+  skills: DiscoveredSkill[],
+  prompt: string,
+  stopwords?: Iterable<string>
+): DiscoveredSkill[] {
+  const sw = new Set(stopwords ?? DEFAULT_STOPWORDS);
   const promptLower = prompt.toLowerCase();
   return skills.filter((skill) => {
     if (promptLower.includes(skill.name.toLowerCase())) return true;
@@ -164,7 +169,7 @@ export function routeSkillsByPrompt(skills: DiscoveredSkill[], prompt: string): 
       const keywords = triggerLower
         .replace(/[^a-z\u4e00-\u9fa5\s]/g, ' ')
         .split(/\s+/)
-        .filter((k) => k.length >= 2 && !STOPWORDS.has(k));
+        .filter((k) => k.length >= 2 && !sw.has(k));
       return keywords.length > 0 && keywords.some((kw) => promptLower.includes(kw));
     })) return true;
     return false;

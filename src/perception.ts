@@ -273,7 +273,7 @@ export class Perception {
 
     const mode = options.injectMode || this.config.skillInjectMode || 'all';
     const routed = mode === 'routed' && prompt
-      ? routeSkillsByPrompt(skills, prompt)
+      ? routeSkillsByPrompt(skills, prompt, this.config.stopwords)
       : skills;
 
     const target = routed.length > 0 ? routed : skills;
