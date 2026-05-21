@@ -50,11 +50,27 @@ export interface LLMClientOptions {
 export interface LLMCompletionOptions {
   jsonSchema?: Record<string, unknown>;
   jsonSchemaName?: string;
+  tools?: Array<{
+    type: 'function';
+    function: {
+      name: string;
+      description?: string;
+      parameters?: Record<string, unknown>;
+    };
+  }>;
+  toolChoice?: 'auto' | 'none' | 'required';
+}
+
+export interface LLMToolCall {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
 }
 
 export interface LLMCompletionResult {
   content: string;
   finishReason?: string;
+  toolCalls?: LLMToolCall[];
 }
 
 export interface LLMClient {
@@ -83,6 +99,10 @@ function buildRequestBody(
         strict: true,
       },
     };
+  }
+  if (opts?.tools && opts.tools.length > 0) {
+    body['tools'] = opts.tools;
+    body['tool_choice'] = opts.toolChoice ?? 'auto';
   }
   return body;
 }
@@ -120,9 +140,14 @@ function createHttpClient(opts: LLMClientOptions): LLMClient {
           }
           const json = await res.json() as any;
           const choice = json.choices?.[0];
+          const rawToolCalls: LLMToolCall[] | undefined =
+            Array.isArray(choice?.message?.tool_calls) && choice.message.tool_calls.length > 0
+              ? choice.message.tool_calls
+              : undefined;
           return {
             content: choice?.message?.content ?? '',
             finishReason: choice?.finish_reason,
+            toolCalls: rawToolCalls,
           };
         } finally {
           if (timeoutId) clearTimeout(timeoutId);

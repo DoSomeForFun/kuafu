@@ -249,7 +249,12 @@ export class Action {
    * Invoke tool by name
    */
   async invokeTool(toolCall: ToolCall): Promise<ToolResult> {
-    const { name, arguments: args } = toolCall.function;
+    const { name } = toolCall.function;
+    // OpenAI API returns arguments as a JSON string; handle both string and pre-parsed object
+    const rawArgs = toolCall.function.arguments;
+    const args: Record<string, any> = typeof rawArgs === 'string'
+      ? (() => { try { return JSON.parse(rawArgs); } catch { return {}; } })()
+      : rawArgs ?? {};
 
     switch (name) {
       case 'bash':
