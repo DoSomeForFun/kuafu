@@ -220,7 +220,7 @@ export class Kernel {
         const toolSpecs = this.action?.getSpecs?.() || [];
 
         const fsm = new KernelFSM(context);
-        await fsm.run({
+        const finalContext = await fsm.run({
           handlePerceiving: (ctx) => handlePerceiving(ctx),
           handleThinking: (ctx) => handleThinking(ctx, {
             buildHistory: (c) => this.buildHistory(c),
@@ -231,14 +231,14 @@ export class Kernel {
           handleReflecting: (ctx) => handleReflecting(ctx, this.store)
         });
 
-        const durationMs = Date.now() - context.runStartTime;
+        const durationMs = Date.now() - finalContext.runStartTime;
         let kernelResult: KernelRunResult = {
-          success: context.state === 'DONE',
-          status: context.state as 'DONE' | 'FAILED',
-          content: context.finalResult?.content || '',
-          steps: context.stepCount,
+          success: finalContext.state === 'DONE',
+          status: finalContext.state as 'DONE' | 'FAILED',
+          content: finalContext.finalResult?.content || '',
+          steps: finalContext.stepCount,
           durationMs,
-          stopReason: context.finalResult?.stopReason,
+          stopReason: finalContext.finalResult?.stopReason,
           meta: {
             loop: { stopReason: context.finalResult?.stopReason, durationMs },
             hooks: {
